@@ -1,0 +1,223 @@
+.main {
+    padding-top: 80px;
+}
+
+/* Hero */
+.hero {
+    padding: 80px 24px;
+    text-align: center;
+}
+
+.container {
+    max-width: 1100px;
+    margin: 0 auto;
+}
+
+.heroTitle {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 12px;
+    letter-spacing: -0.02em;
+}
+
+.gradient {
+    background: linear-gradient(135deg, #8b5cf6, #06b6d4);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.heroSubtitle {
+    font-size: 1.125rem;
+    color: #6b7280;
+}
+
+/* Programs */
+.programs {
+    padding: 0 24px 64px;
+}
+
+.programGrid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+}
+
+.programCard {
+    padding: 40px 32px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 28px;
+    text-align: center;
+    transition: all 0.3s ease;
+}
+
+.programCard:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 20px 40px -12px rgba(139, 92, 246, 0.1);
+}
+
+.programIcon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(6, 182, 212, 0.1));
+    border-radius: 18px;
+    color: #8b5cf6;
+    margin-bottom: 20px;
+}
+
+.programTitle {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 8px;
+}
+
+.programDesc {
+    font-size: 0.938rem;
+    color: #6b7280;
+    line-height: 1.6;
+    margin-bottom: 20px;
+}
+
+.programBenefits {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 24px;
+    text-align: left;
+}
+
+.programBenefits li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.875rem;
+    color: #4a4a4a;
+}
+
+.programBenefits li::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    background: #10b981;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.programCta {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 14px 28px;
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+    color: #fff;
+    font-weight: 600;
+    border-radius: 50px;
+    transition: all 0.3s ease;
+    box-shadow: 0 6px 20px -6px rgba(139, 92, 246, 0.4);
+}
+
+.programCta:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 28px -6px rgba(139, 92, 246, 0.5);
+    color: #fff;
+}
+
+/* Partners */
+.partners {
+    padding: 48px 24px 80px;
+    background: rgba(139, 92, 246, 0.03);
+}
+
+.sectionTitle {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    text-align: center;
+    margin-bottom: 40px;
+}
+
+.partnerLogos {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 32px;
+}
+
+.partnerLogo {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 160px;
+    height: 80px;
+    padding: 16px;
+    background: rgba(255, 255, 255, 0.7);
+    border-radius: 16px;
+    font-weight: 600;
+    color: #6b7280;
+    transition: all 0.2s ease;
+}
+
+.partnerLogo:hover {
+    background: rgba(255, 255, 255, 0.95);
+    color: #1a1a1a;
+}
+
+/* CTA */
+.cta {
+    padding: 48px 24px 80px;
+    text-align: center;
+}
+
+.ctaCard {
+    max-width: 600px;
+    margin: 0 auto;
+    padding: 48px;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.06), rgba(6, 182, 212, 0.04));
+    border-radius: 28px;
+}
+
+.ctaCard h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 8px;
+}
+
+.ctaCard p {
+    color: #6b7280;
+    margin-bottom: 24px;
+}
+
+.ctaBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 16px 32px;
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+    color: #fff;
+    font-weight: 600;
+    border-radius: 50px;
+    transition: all 0.3s ease;
+    box-shadow: 0 8px 24px -8px rgba(139, 92, 246, 0.4);
+}
+
+.ctaBtn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 32px -8px rgba(139, 92, 246, 0.5);
+    color: #fff;
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+    .programGrid {
+        grid-template-columns: 1fr;
+        max-width: 400px;
+        margin: 0 auto;
+    }
+}

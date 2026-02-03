@@ -1,0 +1,239 @@
+.main {
+    padding-top: 80px;
+}
+
+/* Hero */
+.hero {
+    padding: 80px 24px;
+    text-align: center;
+}
+
+.container {
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.heroTitle {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 12px;
+    letter-spacing: -0.02em;
+}
+
+.gradient {
+    background: linear-gradient(135deg, #8b5cf6, #06b6d4);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.heroSubtitle {
+    font-size: 1.125rem;
+    color: #6b7280;
+}
+
+/* Search */
+.searchSection {
+    padding: 0 24px 48px;
+}
+
+.searchBox {
+    max-width: 600px;
+    margin: 0 auto;
+    position: relative;
+}
+
+.searchBox input {
+    width: 100%;
+    padding: 18px 24px 18px 56px;
+    background: rgba(255, 255, 255, 0.8);
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 50px;
+    font-size: 1rem;
+    color: #1a1a1a;
+    transition: all 0.3s ease;
+}
+
+.searchBox input:focus {
+    outline: none;
+    border-color: #8b5cf6;
+    box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.1);
+}
+
+.searchBox input::placeholder {
+    color: #9ca3af;
+}
+
+.searchIcon {
+    position: absolute;
+    left: 22px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #9ca3af;
+}
+
+/* Categories */
+.categories {
+    padding: 0 24px 64px;
+}
+
+.categoryGrid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 24px;
+}
+
+.categoryCard {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    padding: 32px 20px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 24px;
+    transition: all 0.3s ease;
+    cursor: pointer;
+}
+
+.categoryCard:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 16px 32px -8px rgba(139, 92, 246, 0.1);
+    color: inherit;
+}
+
+.categoryIcon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(6, 182, 212, 0.1));
+    border-radius: 16px;
+    color: #8b5cf6;
+    margin-bottom: 16px;
+}
+
+.categoryName {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 4px;
+}
+
+.categoryCount {
+    font-size: 0.813rem;
+    color: #9ca3af;
+}
+
+/* FAQ */
+.faq {
+    padding: 0 24px 64px;
+}
+
+.sectionTitle {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    text-align: center;
+    margin-bottom: 32px;
+}
+
+.faqList {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.faqItem {
+    padding: 24px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.faqItem:hover {
+    background: rgba(255, 255, 255, 0.9);
+}
+
+.faqQuestion {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 1rem;
+    font-weight: 500;
+    color: #1a1a1a;
+}
+
+.faqIcon {
+    color: #8b5cf6;
+    flex-shrink: 0;
+}
+
+.faqAnswer {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(0, 0, 0, 0.05);
+    font-size: 0.938rem;
+    color: #6b7280;
+    line-height: 1.6;
+}
+
+/* Contact */
+.contact {
+    padding: 48px 24px 80px;
+    text-align: center;
+}
+
+.contactCard {
+    max-width: 500px;
+    margin: 0 auto;
+    padding: 48px;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.06), rgba(6, 182, 212, 0.04));
+    border-radius: 28px;
+}
+
+.contactCard h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 8px;
+}
+
+.contactCard p {
+    color: #6b7280;
+    margin-bottom: 24px;
+}
+
+.contactBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 16px 32px;
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+    color: #fff;
+    font-weight: 600;
+    border-radius: 50px;
+    transition: all 0.3s ease;
+    box-shadow: 0 8px 24px -8px rgba(139, 92, 246, 0.4);
+}
+
+.contactBtn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 32px -8px rgba(139, 92, 246, 0.5);
+    color: #fff;
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+    .categoryGrid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 640px) {
+    .categoryGrid {
+        grid-template-columns: 1fr;
+    }
+}

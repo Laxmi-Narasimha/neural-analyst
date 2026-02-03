@@ -1,0 +1,90 @@
+.main {
+    padding-top: 80px;
+}
+
+/* Legal content styles */
+.legalPage {
+    padding: 80px 24px;
+}
+
+.container {
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.title {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 8px;
+    letter-spacing: -0.02em;
+}
+
+.updated {
+    font-size: 0.875rem;
+    color: #9ca3af;
+    margin-bottom: 48px;
+}
+
+.content h2 {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin: 40px 0 16px;
+}
+
+.content h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin: 24px 0 12px;
+}
+
+.content p {
+    font-size: 1rem;
+    color: #4a4a4a;
+    line-height: 1.8;
+    margin-bottom: 16px;
+}
+
+.content ul {
+    margin: 16px 0;
+    padding-left: 24px;
+}
+
+.content li {
+    font-size: 1rem;
+    color: #4a4a4a;
+    line-height: 1.8;
+    margin-bottom: 8px;
+}
+
+.content a {
+    color: #8b5cf6;
+    text-decoration: none;
+}
+
+.content a:hover {
+    text-decoration: underline;
+}
+
+.content strong {
+    font-weight: 600;
+    color: #1a1a1a;
+}
+
+/* Contact section */
+.contact {
+    margin-top: 48px;
+    padding: 32px;
+    background: rgba(139, 92, 246, 0.04);
+    border-radius: 20px;
+}
+
+.contact h2 {
+    margin-top: 0;
+}
+
+.contact p {
+    margin-bottom: 0;
+}

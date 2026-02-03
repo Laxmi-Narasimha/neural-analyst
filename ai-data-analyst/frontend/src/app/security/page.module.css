@@ -1,0 +1,292 @@
+.main {
+    padding-top: 80px;
+}
+
+/* Hero */
+.hero {
+    padding: 80px 24px;
+    text-align: center;
+}
+
+.container {
+    max-width: 900px;
+    margin: 0 auto;
+}
+
+.heroTitle {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 12px;
+    letter-spacing: -0.02em;
+}
+
+.gradient {
+    background: linear-gradient(135deg, #8b5cf6, #06b6d4);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.heroSubtitle {
+    font-size: 1.125rem;
+    color: #6b7280;
+}
+
+/* Certifications */
+.certifications {
+    padding: 0 24px 64px;
+}
+
+.certGrid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 24px;
+}
+
+.certCard {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 24px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 20px;
+}
+
+.certBadge {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 56px;
+    height: 56px;
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(6, 182, 212, 0.1));
+    border-radius: 14px;
+    color: #10b981;
+    flex-shrink: 0;
+}
+
+.certName {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 2px;
+}
+
+.certDesc {
+    font-size: 0.813rem;
+    color: #6b7280;
+    margin: 0;
+}
+
+/* Practices */
+.practices {
+    padding: 48px 24px 64px;
+    background: rgba(139, 92, 246, 0.03);
+}
+
+.sectionTitle {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    text-align: center;
+    margin-bottom: 40px;
+}
+
+.practicesGrid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 24px;
+}
+
+.practiceCard {
+    display: flex;
+    gap: 16px;
+    padding: 28px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 20px;
+}
+
+.practiceIcon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(6, 182, 212, 0.1));
+    border-radius: 12px;
+    color: #8b5cf6;
+    flex-shrink: 0;
+}
+
+.practiceTitle {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 6px;
+}
+
+.practiceDesc {
+    font-size: 0.875rem;
+    color: #6b7280;
+    line-height: 1.6;
+    margin: 0;
+}
+
+/* BYOK */
+.byok {
+    padding: 64px 24px;
+}
+
+.byokCard {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 48px;
+    padding: 48px;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.06), rgba(6, 182, 212, 0.04));
+    border-radius: 28px;
+}
+
+.byokContent {
+    flex: 1;
+}
+
+.byokBadge {
+    display: inline-block;
+    padding: 6px 14px;
+    background: rgba(139, 92, 246, 0.1);
+    color: #8b5cf6;
+    font-size: 0.7rem;
+    font-weight: 600;
+    border-radius: 50px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 16px;
+}
+
+.byokTitle {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 12px;
+}
+
+.byokDesc {
+    color: #6b7280;
+    margin-bottom: 20px;
+    max-width: 450px;
+    line-height: 1.6;
+}
+
+.byokFeatures {
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+}
+
+.byokFeatures li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.875rem;
+    color: #4a4a4a;
+}
+
+.byokCta {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 18px 36px;
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+    color: #fff;
+    font-weight: 600;
+    border-radius: 50px;
+    transition: all 0.3s ease;
+    box-shadow: 0 8px 24px -8px rgba(139, 92, 246, 0.4);
+    white-space: nowrap;
+}
+
+.byokCta:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 32px -8px rgba(139, 92, 246, 0.5);
+    color: #fff;
+}
+
+/* Features */
+.features {
+    padding: 48px 24px 80px;
+    background: rgba(139, 92, 246, 0.03);
+}
+
+.featuresGrid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 24px;
+}
+
+.featureCard {
+    text-align: center;
+    padding: 32px 20px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 20px;
+}
+
+.featureIcon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(6, 182, 212, 0.1));
+    border-radius: 12px;
+    color: #10b981;
+    margin-bottom: 16px;
+}
+
+.featureTitle {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 4px;
+}
+
+.featureDesc {
+    font-size: 0.813rem;
+    color: #6b7280;
+    margin: 0;
+}
+
+/* Responsive */
+@media (max-width: 1024px) {
+    .certGrid {
+        grid-template-columns: 1fr;
+    }
+
+    .practicesGrid {
+        grid-template-columns: 1fr;
+    }
+
+    .byokCard {
+        flex-direction: column;
+        text-align: center;
+    }
+
+    .byokDesc {
+        max-width: none;
+    }
+
+    .byokFeatures {
+        justify-content: center;
+    }
+
+    .featuresGrid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 640px) {
+    .featuresGrid {
+        grid-template-columns: 1fr;
+    }
+}

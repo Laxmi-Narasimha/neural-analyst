@@ -1,0 +1,887 @@
+.container {
+    min-height: 600vh;
+    position: relative;
+}
+
+.sticky {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    display: flex;
+    overflow: hidden;
+}
+
+/* Left Panel */
+.leftPanel {
+    width: 50%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 100px 60px 100px 80px;
+    position: relative;
+}
+
+/* Level Badge */
+.levelBadge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6875rem;
+    font-weight: 500;
+    color: #6b7280;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 24px;
+}
+
+.levelDot {
+    width: 6px;
+    height: 6px;
+    background: #10b981;
+    border-radius: 50%;
+    animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.5;
+        transform: scale(1.2);
+    }
+}
+
+/* Headline */
+.headlineWrapper {
+    min-height: 120px;
+    margin-bottom: 24px;
+}
+
+.headline {
+    font-family: 'Instrument Serif', Georgia, serif;
+    font-size: clamp(2rem, 3.5vw, 2.75rem);
+    font-weight: 400;
+    color: #1a1a1a;
+    line-height: 1.15;
+    letter-spacing: -0.02em;
+}
+
+.typewriter {
+    display: inline;
+}
+
+.cursor {
+    display: inline-block;
+    color: #8b5cf6;
+    animation: blink 1s step-end infinite;
+    margin-left: 2px;
+}
+
+@keyframes blink {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0;
+    }
+}
+
+/* Description */
+.description {
+    font-size: 1.0625rem;
+    color: #6b7280;
+    line-height: 1.7;
+    max-width: 480px;
+    margin-bottom: 40px;
+}
+
+/* Feature Icons - Floating Grid */
+.featureIcons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    margin-bottom: 48px;
+}
+
+.featureIcon {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    opacity: 0;
+    transform: translateY(20px) scale(0.9);
+    transition: all 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.featureIcon.iconVisible {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+.iconCircle {
+    width: 52px;
+    height: 52px;
+    background: rgba(0, 0, 0, 0.03);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #4a4a4a;
+    transition: all 0.3s ease;
+}
+
+.featureIcon:hover .iconCircle {
+    background: #1a1a1a;
+    color: #fff;
+    transform: scale(1.1);
+}
+
+.iconLabel {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    text-align: center;
+    max-width: 80px;
+}
+
+/* Progress Bar */
+.progressBar {
+    position: absolute;
+    bottom: 60px;
+    left: 80px;
+    right: 60px;
+}
+
+.progressTrack {
+    display: flex;
+    gap: 12px;
+}
+
+.progressStep {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    border-radius: 6px;
+}
+
+.progressStep:hover {
+    background: rgba(0, 0, 0, 0.03);
+}
+
+.stepNumber {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.625rem;
+    color: #9ca3af;
+    font-weight: 500;
+}
+
+.stepLabel {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    white-space: nowrap;
+}
+
+.activeStep {
+    background: rgba(0, 0, 0, 0.04);
+}
+
+.activeStep .stepNumber,
+.activeStep .stepLabel {
+    color: #1a1a1a;
+}
+
+.completedStep .stepNumber {
+    color: #10b981;
+}
+
+/* Right Panel */
+.rightPanel {
+    width: 50%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 80px 80px 80px 40px;
+    background: linear-gradient(120deg, rgba(0, 0, 0, 0.01), rgba(0, 0, 0, 0.03));
+}
+
+.visualContainer {
+    position: relative;
+    width: 100%;
+    max-width: 520px;
+    height: 400px;
+}
+
+.visual {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    transform: translateY(60px) scale(0.92);
+    transition: all 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
+}
+
+.activeVisual {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+}
+
+/* Visual Window */
+.visualWindow {
+    width: 100%;
+    height: 100%;
+    background: #1a1a1a;
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow:
+        0 25px 80px -20px rgba(0, 0, 0, 0.3),
+        0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.windowHeader {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 16px 20px;
+    background: rgba(255, 255, 255, 0.03);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.windowDots {
+    display: flex;
+    gap: 8px;
+}
+
+.windowDots span {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+}
+
+.windowHeader>span:last-child {
+    font-size: 0.8125rem;
+    color: rgba(255, 255, 255, 0.4);
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.windowContent {
+    padding: 24px;
+    height: calc(100% - 49px);
+    overflow: hidden;
+}
+
+/* Ingestion Visual */
+.ingestionFlow {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    height: 100%;
+}
+
+.fileCards {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex: 1;
+}
+
+.fileCard {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 10px;
+    opacity: 0;
+    transform: translateX(-20px);
+    animation: slideIn 0.5s ease forwards;
+}
+
+.fileActive {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+@keyframes slideIn {
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+.fileIcon {
+    font-size: 1.25rem;
+}
+
+.fileName {
+    font-size: 0.875rem;
+    color: #fff;
+    flex: 1;
+}
+
+.fileSize {
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.4);
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.arrow {
+    color: rgba(255, 255, 255, 0.3);
+    font-size: 1.25rem;
+}
+
+.processBox {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 16px;
+    background: rgba(139, 92, 246, 0.1);
+    border-radius: 12px;
+}
+
+.processIcon {
+    font-size: 1.5rem;
+}
+
+.processText {
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.6);
+}
+
+.processBar {
+    width: 60px;
+    height: 4px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.processBar span {
+    display: block;
+    width: 70%;
+    height: 100%;
+    background: #8b5cf6;
+    border-radius: 2px;
+    animation: loading 2s ease-in-out infinite;
+}
+
+@keyframes loading {
+    0% {
+        width: 0%;
+    }
+
+    50% {
+        width: 80%;
+    }
+
+    100% {
+        width: 100%;
+    }
+}
+
+.resultBox {
+    padding: 16px 20px;
+    background: rgba(16, 185, 129, 0.15);
+    border-radius: 12px;
+    color: #10b981;
+    font-size: 0.875rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Chat Interface */
+.chatInterface {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    height: 100%;
+}
+
+.chatMessage {
+    border-radius: 12px;
+    padding: 14px 18px;
+}
+
+.userMessage {
+    background: rgba(255, 255, 255, 0.08);
+    margin-left: 40px;
+}
+
+.userMessage p {
+    color: #fff;
+    font-size: 0.9375rem;
+    margin: 0;
+}
+
+.aiMessage {
+    display: flex;
+    gap: 12px;
+}
+
+.aiAvatar {
+    width: 32px;
+    height: 32px;
+    background: linear-gradient(135deg, #8b5cf6, #06b6d4);
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #fff;
+    font-size: 0.625rem;
+    font-weight: 600;
+    flex-shrink: 0;
+}
+
+.aiContent {
+    flex: 1;
+}
+
+.aiContent>p {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 0.875rem;
+    margin: 0 0 12px;
+}
+
+.aiInsight {
+    display: flex;
+    gap: 12px;
+    padding: 14px;
+    background: rgba(16, 185, 129, 0.1);
+    border-radius: 10px;
+    margin-bottom: 12px;
+}
+
+.insightIcon {
+    font-size: 1.25rem;
+}
+
+.aiInsight div {
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.8125rem;
+    line-height: 1.5;
+}
+
+.aiInsight strong {
+    color: #10b981;
+}
+
+.aiTags {
+    display: flex;
+    gap: 8px;
+}
+
+.aiTags span {
+    padding: 4px 10px;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+    font-size: 0.6875rem;
+    color: rgba(255, 255, 255, 0.5);
+}
+
+/* Analysis Grid */
+.analysisGrid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    height: 100%;
+}
+
+.analysisCard {
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+}
+
+.analysisHeader {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+
+.analysisIcon {
+    font-size: 1rem;
+}
+
+.analysisHeader span:last-child {
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.6);
+}
+
+.miniChart {
+    flex: 1;
+    display: flex;
+    align-items: flex-end;
+}
+
+.miniChart svg {
+    width: 100%;
+    height: 50px;
+}
+
+.analysisValue {
+    font-size: 0.8125rem;
+    color: #10b981;
+    font-family: 'JetBrains Mono', monospace;
+    margin-top: auto;
+}
+
+.anomalyDots {
+    display: flex;
+    gap: 8px;
+    flex: 1;
+    align-items: center;
+}
+
+.normalDot {
+    width: 12px;
+    height: 12px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 50%;
+}
+
+.anomalyDot {
+    width: 12px;
+    height: 12px;
+    background: #ef4444;
+    border-radius: 50%;
+    animation: pulseAnomaly 1.5s ease-in-out infinite;
+}
+
+@keyframes pulseAnomaly {
+
+    0%,
+    100% {
+        box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4);
+    }
+
+    50% {
+        box-shadow: 0 0 0 6px rgba(239, 68, 68, 0);
+    }
+}
+
+.correlationBars {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
+}
+
+.correlationBars div {
+    height: 6px;
+    background: linear-gradient(90deg, #8b5cf6, #06b6d4);
+    border-radius: 3px;
+}
+
+/* Dashboard Grid */
+.dashboardGrid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+    gap: 12px;
+    height: 100%;
+}
+
+.dashCard {
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    align-items: flex-end;
+}
+
+.wideCard {
+    grid-column: span 2;
+}
+
+.dashBars {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    width: 100%;
+    height: 80%;
+}
+
+.dashBars div {
+    flex: 1;
+    background: linear-gradient(to top, #8b5cf6, rgba(139, 92, 246, 0.3));
+    border-radius: 4px;
+    transition: height 0.5s ease;
+}
+
+.dashPie {
+    width: 100%;
+    height: 100%;
+    position: relative;
+    border-radius: 50%;
+    overflow: hidden;
+}
+
+.pieSlice {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    background: var(--color);
+    transform: rotate(var(--start, 0deg));
+    clip-path: polygon(50% 50%, 50% 0, 100% 0, 100% 100%, 0 100%, 0 0, 50% 0);
+}
+
+.dashLine {
+    width: 100%;
+    height: 100%;
+}
+
+.dashLine svg {
+    width: 100%;
+    height: 100%;
+}
+
+/* ML Pipeline */
+.mlPipeline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 24px;
+}
+
+.pipelineStep {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 10px;
+}
+
+.stepIcon {
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+}
+
+.stepComplete .stepIcon {
+    color: #10b981;
+}
+
+.stepActive .stepIcon {
+    color: #8b5cf6;
+}
+
+.stepPending {
+    opacity: 0.4;
+}
+
+.spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(139, 92, 246, 0.2);
+    border-top-color: #8b5cf6;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.stepInfo {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.stepName {
+    font-size: 0.75rem;
+    color: #fff;
+}
+
+.stepMeta {
+    font-size: 0.625rem;
+    color: rgba(255, 255, 255, 0.4);
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.pipelineConnector {
+    width: 20px;
+    height: 2px;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.connectorPending {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.modelComparison {
+    display: flex;
+    gap: 10px;
+}
+
+.modelCard {
+    flex: 1;
+    padding: 14px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    position: relative;
+}
+
+.modelCard span:first-child {
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.6);
+}
+
+.modelScore {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 1.125rem;
+    color: #fff;
+}
+
+.modelBest {
+    background: rgba(16, 185, 129, 0.1);
+    border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.bestBadge {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    padding: 2px 8px;
+    background: #10b981;
+    color: #fff;
+    font-size: 0.5625rem;
+    font-weight: 600;
+    border-radius: 4px;
+    text-transform: uppercase;
+}
+
+/* Security Dashboard */
+.securityDashboard {
+    display: flex;
+    gap: 24px;
+    height: 100%;
+}
+
+.securityShield {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 24px;
+    background: rgba(16, 185, 129, 0.05);
+    border-radius: 16px;
+}
+
+.securityShield span {
+    font-size: 0.875rem;
+    color: #10b981;
+    font-weight: 500;
+}
+
+.securityStats {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+}
+
+.securityStat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 16px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 12px;
+}
+
+.statIcon {
+    font-size: 1.25rem;
+}
+
+.statLabel {
+    font-size: 0.6875rem;
+    color: rgba(255, 255, 255, 0.4);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.statValue {
+    font-size: 0.875rem;
+    color: #fff;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+/* Responsive */
+@media (max-width: 1200px) {
+    .leftPanel {
+        padding: 80px 40px;
+    }
+
+    .progressBar {
+        left: 40px;
+        right: 40px;
+        bottom: 40px;
+    }
+
+    .progressTrack {
+        flex-wrap: wrap;
+    }
+
+    .rightPanel {
+        padding: 60px 40px;
+    }
+}
+
+@media (max-width: 1024px) {
+    .sticky {
+        flex-direction: column;
+        height: auto;
+        min-height: 100vh;
+    }
+
+    .leftPanel,
+    .rightPanel {
+        width: 100%;
+        padding: 60px 24px;
+    }
+
+    .progressBar {
+        position: static;
+        margin-top: 40px;
+    }
+
+    .visualContainer {
+        max-width: 100%;
+        height: 350px;
+    }
+}

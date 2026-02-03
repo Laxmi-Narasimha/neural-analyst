@@ -1,0 +1,45 @@
+# macOS
+.DS_Store
+
+# Git (nested repos inside monorepo)
+**/.git/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage_html/
+htmlcov/
+.tox/
+.venv/
+venv/
+ENV/
+env/
+
+# Env files (do not commit secrets)
+.env
+**/.env
+.env.*
+**/.env.*
+!.env.example
+!**/.env.example
+!.env.template
+!**/.env.template
+
+# Node / Next
+node_modules/
+.next/
+dist/
+build/
+
+# App runtime data
+uploads/
+*.sqlite
+*.db
+*.log

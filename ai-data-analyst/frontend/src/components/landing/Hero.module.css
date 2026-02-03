@@ -1,0 +1,226 @@
+.hero {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+    padding: 120px 40px 80px;
+    position: relative;
+    overflow: hidden;
+}
+
+.content {
+    max-width: 800px;
+    position: relative;
+    z-index: 2;
+}
+
+.title {
+    font-family: 'Instrument Serif', Georgia, serif;
+    font-size: clamp(2.5rem, 6vw, 4rem);
+    font-weight: 400;
+    color: #1a1a1a;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+    margin-bottom: 32px;
+    min-height: 2.4em;
+}
+
+.typewriterText {
+    display: inline;
+}
+
+.cursor {
+    display: inline-block;
+    color: #8b5cf6;
+    animation: blink 1s step-end infinite;
+    margin-left: 2px;
+    font-weight: 300;
+}
+
+@keyframes blink {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0;
+    }
+}
+
+.subtitle {
+    display: block;
+    margin-top: 8px;
+    color: #4a4a4a;
+    font-size: 0.75em;
+}
+
+.italic {
+    font-style: italic;
+    color: #1a1a1a;
+}
+
+.description {
+    font-size: 1.125rem;
+    color: #6b7280;
+    line-height: 1.7;
+    max-width: 520px;
+    margin: 0 auto 48px;
+    font-weight: 400;
+}
+
+/* Actions */
+.actions {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+    flex-wrap: wrap;
+}
+
+.primaryBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 32px;
+    background: #1a1a1a;
+    color: #fff;
+    font-weight: 500;
+    font-size: 0.9375rem;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+}
+
+.primaryBtn:hover {
+    background: #333;
+    transform: translateY(-2px);
+    opacity: 1;
+}
+
+.secondaryBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 16px 32px;
+    background: transparent;
+    color: #4a4a4a;
+    font-weight: 500;
+    font-size: 0.9375rem;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+}
+
+.secondaryBtn:hover {
+    background: rgba(0, 0, 0, 0.03);
+    opacity: 1;
+}
+
+/* Floating Icons */
+.floatingIcons {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 800px;
+    height: 300px;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+    z-index: 1;
+}
+
+.floatingIcon {
+    position: absolute;
+    opacity: 0;
+    animation: floatIn 0.8s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    transition: transform 0.3s ease-out;
+}
+
+@keyframes floatIn {
+    from {
+        opacity: 0;
+        transform: scale(0.5);
+    }
+
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.iconSvg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(8px);
+    border-radius: 50%;
+    color: #6b7280;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
+    transition: transform 0.3s ease, box-shadow 0.3s ease, color 0.3s ease;
+}
+
+.floatingIcon:hover .iconSvg {
+    transform: scale(1.2);
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.1);
+    color: #8b5cf6;
+}
+
+/* Scroll Indicator */
+.scrollIndicator {
+    position: absolute;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    color: #9ca3af;
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    animation: bounce 2s ease-in-out infinite;
+}
+
+@keyframes bounce {
+
+    0%,
+    100% {
+        transform: translateX(-50%) translateY(0);
+    }
+
+    50% {
+        transform: translateX(-50%) translateY(8px);
+    }
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .hero {
+        padding: 100px 24px 60px;
+    }
+
+    .actions {
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .primaryBtn,
+    .secondaryBtn {
+        width: 100%;
+        max-width: 280px;
+        justify-content: center;
+    }
+
+    .floatingIcons {
+        display: none;
+    }
+
+    .scrollIndicator {
+        display: none;
+    }
+}

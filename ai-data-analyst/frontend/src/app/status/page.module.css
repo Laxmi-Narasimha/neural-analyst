@@ -1,0 +1,330 @@
+.main {
+    padding-top: 80px;
+}
+
+/* Hero */
+.hero {
+    padding: 80px 24px;
+    text-align: center;
+}
+
+.container {
+    max-width: 1000px;
+    margin: 0 auto;
+}
+
+.heroTitle {
+    font-size: clamp(2rem, 5vw, 3rem);
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 12px;
+    letter-spacing: -0.02em;
+}
+
+.gradient {
+    background: linear-gradient(135deg, #8b5cf6, #06b6d4);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+}
+
+.heroSubtitle {
+    font-size: 1.125rem;
+    color: #6b7280;
+}
+
+/* Status Banner */
+.statusBanner {
+    padding: 0 24px 48px;
+}
+
+.statusCard {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 24px 32px;
+    background: rgba(16, 185, 129, 0.06);
+    border-radius: 20px;
+}
+
+.statusCard.degraded {
+    background: rgba(251, 146, 60, 0.06);
+}
+
+.statusCard.outage {
+    background: rgba(239, 68, 68, 0.06);
+}
+
+.statusInfo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.statusDot {
+    width: 12px;
+    height: 12px;
+    background: #10b981;
+    border-radius: 50%;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.5);
+}
+
+.statusCard.degraded .statusDot {
+    background: #f97316;
+    box-shadow: 0 0 8px rgba(251, 146, 60, 0.5);
+}
+
+.statusCard.outage .statusDot {
+    background: #ef4444;
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.5);
+}
+
+.statusText {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: #1a1a1a;
+}
+
+.statusTime {
+    font-size: 0.875rem;
+    color: #9ca3af;
+}
+
+/* Uptime */
+.uptime {
+    padding: 0 24px 48px;
+}
+
+.sectionTitle {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 20px;
+}
+
+.uptimeBar {
+    display: flex;
+    gap: 2px;
+    padding: 24px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 20px;
+    margin-bottom: 12px;
+}
+
+.uptimeDay {
+    flex: 1;
+    height: 32px;
+    background: #10b981;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: transform 0.2s ease;
+}
+
+.uptimeDay:hover {
+    transform: scaleY(1.2);
+}
+
+.uptimeDay.degraded {
+    background: #f97316;
+}
+
+.uptimeDay.outage {
+    background: #ef4444;
+}
+
+.uptimeLabel {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+    color: #9ca3af;
+}
+
+/* Services */
+.services {
+    padding: 0 24px 48px;
+}
+
+.serviceList {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.serviceItem {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 16px;
+}
+
+.serviceName {
+    font-size: 1rem;
+    font-weight: 500;
+    color: #1a1a1a;
+}
+
+.serviceStatus {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.875rem;
+    color: #10b981;
+    font-weight: 500;
+}
+
+.serviceStatus.degraded {
+    color: #f97316;
+}
+
+.serviceStatus.outage {
+    color: #ef4444;
+}
+
+.serviceDot {
+    width: 8px;
+    height: 8px;
+    background: currentColor;
+    border-radius: 50%;
+}
+
+/* Incidents */
+.incidents {
+    padding: 0 24px 80px;
+}
+
+.incidentList {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.incident {
+    padding: 24px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 20px;
+}
+
+.incidentHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 12px;
+}
+
+.incidentTitle {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1a1a1a;
+}
+
+.incidentStatus {
+    padding: 4px 12px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    border-radius: 50px;
+    text-transform: uppercase;
+}
+
+.incidentStatus.resolved {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+}
+
+.incidentStatus.investigating {
+    background: rgba(251, 146, 60, 0.1);
+    color: #f97316;
+}
+
+.incidentDesc {
+    font-size: 0.938rem;
+    color: #6b7280;
+    margin-bottom: 12px;
+    line-height: 1.6;
+}
+
+.incidentTime {
+    font-size: 0.813rem;
+    color: #9ca3af;
+}
+
+/* Subscribe */
+.subscribe {
+    padding: 48px 24px 80px;
+    text-align: center;
+}
+
+.subscribeCard {
+    max-width: 500px;
+    margin: 0 auto;
+    padding: 40px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 24px;
+}
+
+.subscribeCard h2 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 8px;
+}
+
+.subscribeCard p {
+    font-size: 0.938rem;
+    color: #6b7280;
+    margin-bottom: 20px;
+}
+
+.subscribeForm {
+    display: flex;
+    gap: 12px;
+}
+
+.subscribeForm input {
+    flex: 1;
+    padding: 14px 20px;
+    background: #ffffff;
+    border: 1px solid #e5e5e5;
+    border-radius: 50px;
+    color: #1a1a1a;
+    font-size: 0.938rem;
+}
+
+.subscribeForm input:focus {
+    outline: none;
+    border-color: #8b5cf6;
+}
+
+.subscribeForm input::placeholder {
+    color: #9ca3af;
+}
+
+.subscribeForm button {
+    padding: 14px 28px;
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+    color: #fff;
+    font-weight: 600;
+    border: none;
+    border-radius: 50px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+}
+
+.subscribeForm button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 20px -4px rgba(139, 92, 246, 0.4);
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+    .subscribeForm {
+        flex-direction: column;
+    }
+
+    .statusCard {
+        flex-direction: column;
+        text-align: center;
+        gap: 12px;
+    }
+}

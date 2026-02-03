@@ -1,0 +1,154 @@
+.main {
+    padding: 32px;
+}
+
+/* Header */
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 32px;
+}
+
+.headerLeft h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #1a1a1a;
+    margin-bottom: 4px;
+}
+
+.headerLeft p {
+    font-size: 0.938rem;
+    color: #6b7280;
+    margin: 0;
+}
+
+.newBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 24px;
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.875rem;
+    border: none;
+    border-radius: 50px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    box-shadow: 0 6px 20px -6px rgba(139, 92, 246, 0.4);
+}
+
+.newBtn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 28px -6px rgba(139, 92, 246, 0.5);
+    color: #fff;
+}
+
+/* Analysis List */
+.analysisList {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.analysisCard {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 24px;
+    background: rgba(255, 255, 255, 0.7);
+    border-radius: 20px;
+    transition: all 0.3s ease;
+    cursor: pointer;
+}
+
+.analysisCard:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 28px -8px rgba(139, 92, 246, 0.1);
+    color: inherit;
+}
+
+.analysisInfo {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.analysisIcon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    height: 48px;
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), rgba(6, 182, 212, 0.1));
+    border-radius: 14px;
+    color: #8b5cf6;
+}
+
+.analysisDetails h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 4px;
+}
+
+.analysisMeta {
+    display: flex;
+    gap: 16px;
+    font-size: 0.813rem;
+    color: #9ca3af;
+}
+
+.analysisStatus {
+    padding: 6px 14px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border-radius: 50px;
+}
+
+.analysisStatus.completed {
+    background: rgba(16, 185, 129, 0.1);
+    color: #10b981;
+}
+
+.analysisStatus.running {
+    background: rgba(6, 182, 212, 0.1);
+    color: #06b6d4;
+}
+
+.analysisStatus.pending {
+    background: rgba(251, 146, 60, 0.1);
+    color: #f97316;
+}
+
+/* Empty State */
+.empty {
+    text-align: center;
+    padding: 80px 24px;
+}
+
+.emptyIcon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 80px;
+    height: 80px;
+    background: rgba(139, 92, 246, 0.08);
+    border-radius: 24px;
+    color: #8b5cf6;
+    margin-bottom: 24px;
+}
+
+.emptyTitle {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: #1a1a1a;
+    margin-bottom: 8px;
+}
+
+.emptyDesc {
+    font-size: 0.938rem;
+    color: #6b7280;
+    margin-bottom: 24px;
+}
