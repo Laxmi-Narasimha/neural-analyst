@@ -342,7 +342,7 @@ The product is “ready” for the flagship button when:
 - Reports can be exported and re-run.
 
 For engineering details (how to implement safely), see:
-- `docs/TALK_TO_YOUR_DATA_ENGINEERING_SPEC.md`
+- `spec_review/TALK_TO_YOUR_DATA_ENGINEERING_SPEC.md`
 
 ---
 
@@ -698,4 +698,3 @@ These are manual “demo scripts” and can later become automated tests:
 - Include dataset rows containing prompt injection text and verify:
   - the assistant treats it as data content, not instructions
   - no secrets or internal prompts are exposed
-

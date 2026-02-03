@@ -331,7 +331,7 @@ The repo already contains useful modules. The main engineering task is to connec
 - Time series workflows
 
 For security and evaluation requirements, see:
-- `docs/TALK_TO_YOUR_DATA_SECURITY_EVAL_SPEC.md`
+- `spec_review/TALK_TO_YOUR_DATA_SECURITY_EVAL_SPEC.md`
 
 ---
 
@@ -766,7 +766,7 @@ Once the API contracts are stable:
 - backend can evolve internally without breaking UX
 
 The concrete P0/P1/P2 task list (with file mapping) is in:
-- `docs/TALK_TO_YOUR_DATA_BACKLOG.md`
+- `spec_review/TALK_TO_YOUR_DATA_BACKLOG.md`
 
 The operator allow-list and per-operator evaluation expectations are in:
-- `docs/TALK_TO_YOUR_DATA_OPERATOR_CATALOG.md`
+- `spec_review/TALK_TO_YOUR_DATA_OPERATOR_CATALOG.md`

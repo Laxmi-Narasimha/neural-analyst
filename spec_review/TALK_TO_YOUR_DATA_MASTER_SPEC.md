@@ -8,12 +8,12 @@
 This master spec is the entry point to a **30–40 page documentation pack** for building a world-class “AI Data Analyst / AI Data Scientist” experience that works primarily via prompts and guided UI (not by users writing code).
 
 **Documentation pack (read in order):**
-1. `docs/TALK_TO_YOUR_DATA_MASTER_SPEC.md` (this file) — vision, ground truth audit, feature coverage matrix, top-level roadmap.
-2. `docs/TALK_TO_YOUR_DATA_FEATURE_SPEC.md` — detailed product requirements and UX flows for every major feature.
-3. `docs/TALK_TO_YOUR_DATA_ENGINEERING_SPEC.md` — detailed architecture: dataset lifecycle, compute layer, agent tools, job system, persistence.
-4. `docs/TALK_TO_YOUR_DATA_SECURITY_EVAL_SPEC.md` — threat model, safety constraints, evaluation harness, quality gates.
-5. `docs/TALK_TO_YOUR_DATA_OPERATOR_CATALOG.md` — allow-listed compute primitives (operators) that make the assistant “dynamic” without unsafe code execution.
-6. `docs/TALK_TO_YOUR_DATA_BACKLOG.md` — prioritized implementation backlog mapped to this repo’s modules (P0/P1/P2), with acceptance criteria.
+1. `spec_review/TALK_TO_YOUR_DATA_MASTER_SPEC.md` (this file) — vision, ground truth audit, feature coverage matrix, top-level roadmap.
+2. `spec_review/TALK_TO_YOUR_DATA_FEATURE_SPEC.md` — detailed product requirements and UX flows for every major feature.
+3. `spec_review/TALK_TO_YOUR_DATA_ENGINEERING_SPEC.md` — detailed architecture: dataset lifecycle, compute layer, agent tools, job system, persistence.
+4. `spec_review/TALK_TO_YOUR_DATA_SECURITY_EVAL_SPEC.md` — threat model, safety constraints, evaluation harness, quality gates.
+5. `spec_review/TALK_TO_YOUR_DATA_OPERATOR_CATALOG.md` — allow-listed compute primitives (operators) that make the assistant “dynamic” without unsafe code execution.
+6. `spec_review/TALK_TO_YOUR_DATA_BACKLOG.md` — prioritized implementation backlog mapped to this repo’s modules (P0/P1/P2), with acceptance criteria.
 
 ---
 
@@ -220,9 +220,9 @@ This repo already contains many engine modules in these categories; the main wor
 ## 6) How to use the rest of this documentation pack
 
 If your goal is to “build the best button that mesmerizes users”, start here:
-- Read `docs/TALK_TO_YOUR_DATA_FEATURE_SPEC.md` and implement the “Data Speaks” screen and workflow first.
-- Then use `docs/TALK_TO_YOUR_DATA_ENGINEERING_SPEC.md` to implement the compute layer and tool contracts.
-- Use `docs/TALK_TO_YOUR_DATA_SECURITY_EVAL_SPEC.md` to ensure the system is safe and provably grounded.
+- Read `spec_review/TALK_TO_YOUR_DATA_FEATURE_SPEC.md` and implement the “Data Speaks” screen and workflow first.
+- Then use `spec_review/TALK_TO_YOUR_DATA_ENGINEERING_SPEC.md` to implement the compute layer and tool contracts.
+- Use `spec_review/TALK_TO_YOUR_DATA_SECURITY_EVAL_SPEC.md` to ensure the system is safe and provably grounded.
 
 ---
 
@@ -378,7 +378,7 @@ This is the order that maximizes visible progress and prevents wasted work:
 6. Integrate quality/adequacy as a first-class “readiness” feature tied to datasets.
 
 The detailed task breakdown and mapping to current files is in:
-- `docs/TALK_TO_YOUR_DATA_BACKLOG.md`
+- `spec_review/TALK_TO_YOUR_DATA_BACKLOG.md`
 
 ---
 

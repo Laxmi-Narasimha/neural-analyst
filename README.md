@@ -34,4 +34,4 @@ make dev-validator
 - `docs/ARCHITECTURE.md` — end-to-end request flow for both apps.
 - `docs/INDUSTRY_GRADE_AUDIT.md` — severity-ranked gaps + concrete fixes/backlog.
 - `docs/SETUP.md` — machine setup runbook (Python/Node/Postgres).
-
+- `spec_review/TALK_TO_YOUR_DATA_MASTER_SPEC.md` — full “Talk to Your Data” product + engineering + security spec pack entry point.

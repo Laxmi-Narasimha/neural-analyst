@@ -7,10 +7,10 @@
 This backlog is intentionally written to be “buildable”: each item states why it matters, what to build, where it likely lives in the current repo, and how to know it’s done.
 
 Related docs:
-- `docs/TALK_TO_YOUR_DATA_MASTER_SPEC.md` (vision + success criteria)
-- `docs/TALK_TO_YOUR_DATA_FEATURE_SPEC.md` (UX flows)
-- `docs/TALK_TO_YOUR_DATA_ENGINEERING_SPEC.md` (architecture)
-- `docs/TALK_TO_YOUR_DATA_SECURITY_EVAL_SPEC.md` (safety + evaluation)
+- `spec_review/TALK_TO_YOUR_DATA_MASTER_SPEC.md` (vision + success criteria)
+- `spec_review/TALK_TO_YOUR_DATA_FEATURE_SPEC.md` (UX flows)
+- `spec_review/TALK_TO_YOUR_DATA_ENGINEERING_SPEC.md` (architecture)
+- `spec_review/TALK_TO_YOUR_DATA_SECURITY_EVAL_SPEC.md` (safety + evaluation)
 
 ---
 
@@ -381,4 +381,3 @@ Define:
 - time-to-first-evidence SLO
 - job latency SLO
 - error budget policies
-

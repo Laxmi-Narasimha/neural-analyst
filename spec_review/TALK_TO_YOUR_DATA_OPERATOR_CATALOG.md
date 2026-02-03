@@ -10,8 +10,8 @@ This catalog is meant to be:
 - and **safety-ready** (explicit limits and guardrails).
 
 Related docs:
-- `docs/TALK_TO_YOUR_DATA_ENGINEERING_SPEC.md` (architecture and execution model)
-- `docs/TALK_TO_YOUR_DATA_SECURITY_EVAL_SPEC.md` (threat model and grounding rules)
+- `spec_review/TALK_TO_YOUR_DATA_ENGINEERING_SPEC.md` (architecture and execution model)
+- `spec_review/TALK_TO_YOUR_DATA_SECURITY_EVAL_SPEC.md` (threat model and grounding rules)
 
 ---
 
@@ -232,4 +232,3 @@ Acceptance threshold examples:
 - Profiling operators produce stable results across runs given the same dataset_version.
 - Sampling-based operators label estimates and include sample size.
 - No operator can return an unbounded amount of data to the UI.
-
