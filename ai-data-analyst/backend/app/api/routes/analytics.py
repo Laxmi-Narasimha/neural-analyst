@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 from typing import Any, Optional
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routes.auth import get_current_user, require_permission
 from app.services.auth_service import AuthUser, Permission
+from app.services.database import get_db_session
+from app.services.dataset_loader import DatasetLoaderService
 from app.ml.statistical_tests import get_statistical_testing_engine
 from app.ml.segmentation import get_segmentation_engine
 from app.ml.customer_analytics import get_customer_analytics_engine
@@ -30,7 +34,7 @@ router = APIRouter()
 
 class StatisticalTestRequest(BaseModel):
     """Statistical test request."""
-    dataset_id: str
+    dataset_id: UUID
     test_type: str  # t_test, anova, chi_square, correlation
     group_column: Optional[str] = None
     value_column: str
@@ -40,7 +44,7 @@ class StatisticalTestRequest(BaseModel):
 
 class SegmentationRequest(BaseModel):
     """Segmentation request."""
-    dataset_id: str
+    dataset_id: UUID
     method: str = "kmeans"
     n_segments: int = 5
     features: Optional[list[str]] = None
@@ -48,7 +52,7 @@ class SegmentationRequest(BaseModel):
 
 class CustomerAnalyticsRequest(BaseModel):
     """Customer analytics request."""
-    dataset_id: str
+    dataset_id: UUID
     analysis_type: str  # rfm, cohort, clv, churn
     customer_column: str
     date_column: str
@@ -57,7 +61,7 @@ class CustomerAnalyticsRequest(BaseModel):
 
 class ForecastRequest(BaseModel):
     """Forecasting request."""
-    dataset_id: str
+    dataset_id: UUID
     date_column: str
     value_column: str
     periods: int = 30
@@ -66,7 +70,7 @@ class ForecastRequest(BaseModel):
 
 class AnomalyDetectionRequest(BaseModel):
     """Anomaly detection request."""
-    dataset_id: str
+    dataset_id: UUID
     columns: Optional[list[str]] = None
     method: str = "isolation_forest"
     contamination: float = 0.1
@@ -84,40 +88,15 @@ class ABTestRequest(BaseModel):
 
 class DataProfileRequest(BaseModel):
     """Data profiling request."""
-    dataset_id: str
+    dataset_id: UUID
 
 
 class BIMetricsRequest(BaseModel):
     """BI metrics request."""
-    dataset_id: str
+    dataset_id: UUID
     revenue_column: Optional[str] = None
     user_column: Optional[str] = None
     date_column: Optional[str] = None
-
-
-# ============================================================================
-# Mock data loader (replace with actual dataset loading)
-# ============================================================================
-
-import pandas as pd
-import numpy as np
-
-def get_dataset(dataset_id: str) -> pd.DataFrame:
-    """Load dataset by ID (placeholder)."""
-    # In production, load from database
-    # For demo, generate sample data
-    np.random.seed(42)
-    n = 1000
-    
-    return pd.DataFrame({
-        'customer_id': range(n),
-        'date': pd.date_range('2024-01-01', periods=n, freq='D'),
-        'revenue': np.random.exponential(100, n),
-        'quantity': np.random.poisson(3, n),
-        'category': np.random.choice(['A', 'B', 'C'], n),
-        'age': np.random.normal(35, 10, n).astype(int),
-        'value': np.random.randn(n) * 50 + 100
-    })
 
 
 # ============================================================================
@@ -127,11 +106,13 @@ def get_dataset(dataset_id: str) -> pd.DataFrame:
 @router.post("/statistical-test")
 async def run_statistical_test(
     request: StatisticalTestRequest,
+    db: AsyncSession = Depends(get_db_session),
     user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS))
 ):
     """Run statistical test."""
     try:
-        df = get_dataset(request.dataset_id)
+        loader = DatasetLoaderService(db)
+        df = (await loader.load_dataset(request.dataset_id, owner_id=user.user_id, sample_rows=200_000)).df
         engine = get_statistical_testing_engine(request.alpha)
         
         if request.test_type == "correlation":
@@ -159,13 +140,15 @@ async def run_statistical_test(
 @router.post("/segmentation")
 async def run_segmentation(
     request: SegmentationRequest,
+    db: AsyncSession = Depends(get_db_session),
     user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS))
 ):
     """Run customer/data segmentation."""
     try:
         from app.ml.segmentation import SegmentationMethod
         
-        df = get_dataset(request.dataset_id)
+        loader = DatasetLoaderService(db)
+        df = (await loader.load_dataset(request.dataset_id, owner_id=user.user_id, sample_rows=200_000)).df
         engine = get_segmentation_engine()
         
         method = SegmentationMethod(request.method)
@@ -192,11 +175,13 @@ async def run_segmentation(
 @router.post("/customer-analytics")
 async def run_customer_analytics(
     request: CustomerAnalyticsRequest,
+    db: AsyncSession = Depends(get_db_session),
     user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS))
 ):
     """Run customer analytics (RFM, Cohort, CLV, Churn)."""
     try:
-        df = get_dataset(request.dataset_id)
+        loader = DatasetLoaderService(db)
+        df = (await loader.load_dataset(request.dataset_id, owner_id=user.user_id, sample_rows=200_000)).df
         engine = get_customer_analytics_engine()
         
         if request.analysis_type == "rfm":
@@ -240,13 +225,15 @@ async def run_customer_analytics(
 @router.post("/forecast")
 async def run_forecast(
     request: ForecastRequest,
+    db: AsyncSession = Depends(get_db_session),
     user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS))
 ):
     """Run time series forecasting."""
     try:
         from app.ml.forecasting import ForecastMethod
         
-        df = get_dataset(request.dataset_id)
+        loader = DatasetLoaderService(db)
+        df = (await loader.load_dataset(request.dataset_id, owner_id=user.user_id, sample_rows=200_000)).df
         engine = get_forecast_engine()
         
         result = engine.forecast(
@@ -273,13 +260,15 @@ async def run_forecast(
 @router.post("/anomaly-detection")
 async def detect_anomalies(
     request: AnomalyDetectionRequest,
+    db: AsyncSession = Depends(get_db_session),
     user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS))
 ):
     """Detect anomalies in data."""
     try:
         from app.ml.anomaly_detection import AnomalyMethod
         
-        df = get_dataset(request.dataset_id)
+        loader = DatasetLoaderService(db)
+        df = (await loader.load_dataset(request.dataset_id, owner_id=user.user_id, sample_rows=200_000)).df
         engine = get_anomaly_detection_engine()
         
         result = engine.detect(
@@ -344,11 +333,13 @@ async def analyze_ab_test(
 @router.post("/profile")
 async def profile_data(
     request: DataProfileRequest,
+    db: AsyncSession = Depends(get_db_session),
     user: AuthUser = Depends(require_permission(Permission.READ_DATA))
 ):
     """Generate data profile."""
     try:
-        df = get_dataset(request.dataset_id)
+        loader = DatasetLoaderService(db)
+        df = (await loader.load_dataset(request.dataset_id, owner_id=user.user_id, sample_rows=200_000)).df
         engine = get_data_profiling_engine()
         
         profile = engine.profile(df, name=request.dataset_id)
@@ -369,11 +360,13 @@ async def profile_data(
 @router.post("/bi-metrics")
 async def calculate_bi_metrics(
     request: BIMetricsRequest,
+    db: AsyncSession = Depends(get_db_session),
     user: AuthUser = Depends(require_permission(Permission.READ_DATA))
 ):
     """Calculate business intelligence metrics."""
     try:
-        df = get_dataset(request.dataset_id)
+        loader = DatasetLoaderService(db)
+        df = (await loader.load_dataset(request.dataset_id, owner_id=user.user_id, sample_rows=200_000)).df
         engine = get_bi_metrics_engine()
         
         metrics = engine.calculate_core_metrics(

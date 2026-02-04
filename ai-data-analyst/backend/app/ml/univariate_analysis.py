@@ -227,6 +227,16 @@ class UnivariateResult:
             }
         
         return result
+
+    @property
+    def std(self) -> float:
+        na = self.numeric_analysis
+        if na is None or na.std is None:
+            return 0.0
+        try:
+            return float(na.std)
+        except Exception:
+            return 0.0
     
     def _safe_round(self, val: float, decimals: int = 4) -> Optional[float]:
         if val is None or np.isnan(val) or np.isinf(val):

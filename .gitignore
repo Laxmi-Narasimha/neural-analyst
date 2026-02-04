@@ -40,6 +40,8 @@ build/
 
 # App runtime data
 uploads/
+artifacts/
+**/artifacts/
 *.sqlite
 *.db
 *.log

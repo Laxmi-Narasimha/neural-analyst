@@ -1,12 +1,13 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import {
     IconDashboard, IconDatabase, IconChart, IconSettings,
-    IconPlus, IconSearch, IconUser, IconArrowRight, IconServer, IconShield
+    IconPlus, IconSearch, IconUser, IconArrowRight, IconServer, IconShield, IconSparkles
 } from '@/components/icons';
+import { getAccessToken } from '@/lib/auth';
 import styles from './layout.module.css';
 
 const navItems = [
@@ -14,13 +15,33 @@ const navItems = [
     { href: '/app/datasets', label: 'Datasets', Icon: IconDatabase },
     { href: '/app/connections', label: 'Connections', Icon: IconServer },
     { href: '/app/analysis', label: 'Analysis', Icon: IconChart },
+    { href: '/app/data-speaks', label: 'Data Speaks', Icon: IconSparkles },
     { href: '/app/quality', label: 'Data Quality', Icon: IconShield },
     { href: '/app/settings', label: 'Settings', Icon: IconSettings },
 ];
 
 export default function AppLayout({ children }) {
+    const router = useRouter();
     const pathname = usePathname();
     const [sidebarOpen, setSidebarOpen] = useState(true);
+    const [authReady, setAuthReady] = useState(false);
+
+    useEffect(() => {
+        const token = getAccessToken();
+        if (!token) {
+            router.replace('/login');
+            return;
+        }
+        setAuthReady(true);
+    }, [router]);
+
+    if (!authReady) {
+        return (
+            <div className={styles.layout} style={{ alignItems: 'center', justifyContent: 'center' }}>
+                <div style={{ color: 'var(--text-muted, #666)' }}>Loading...</div>
+            </div>
+        );
+    }
 
     return (
         <div className={styles.layout}>

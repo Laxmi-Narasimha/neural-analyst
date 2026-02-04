@@ -2,25 +2,32 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { IconMail, IconLock, IconEye, IconEyeOff, IconArrowRight, IconKey } from '@/components/icons';
+import api from '@/lib/api';
 import styles from './page.module.css';
 
 export default function LoginPage() {
+    const router = useRouter();
     const [showPassword, setShowPassword] = useState(false);
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [errorMessage, setErrorMessage] = useState(null);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
         setIsLoading(true);
-        // Simulate API call
-        setTimeout(() => {
+        setErrorMessage(null);
+        try {
+            await api.login(email, password);
+            router.replace('/app/dashboard');
+        } catch (err) {
+            setErrorMessage(err?.message || 'Login failed');
+        } finally {
             setIsLoading(false);
-            // Redirect to dashboard
-            window.location.href = '/app/dashboard';
-        }, 1500);
+        }
     };
 
     return (
@@ -40,6 +47,12 @@ export default function LoginPage() {
                                 Sign in to access your AI data analyst
                             </p>
                         </div>
+
+                        {errorMessage && (
+                            <div style={{ color: 'var(--error-500)', fontSize: 14, marginBottom: 12 }}>
+                                {errorMessage}
+                            </div>
+                        )}
 
                         <form onSubmit={handleSubmit} className={styles.form}>
                             <div className={styles.inputGroup}>

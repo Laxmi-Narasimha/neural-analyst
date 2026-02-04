@@ -384,8 +384,11 @@ class SyntheticDataGenerator:
         # Generate features
         features = {}
         
-        # Normal numeric features
-        for i in range(n_features - 5):
+        # Normal numeric features.
+        # Ensure at least feature_0 exists so edge-case features (e.g. correlated) can be built
+        # even when n_features is small (some tests use n_features=5).
+        base_feature_count = max(1, n_features - 5)
+        for i in range(base_feature_count):
             features[f'feature_{i}'] = np.random.randn(n_samples)
         
         if include_edge_cases:

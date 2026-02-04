@@ -95,22 +95,44 @@ class DataTransformationEngine:
         output_column: str = None
     ):
         """Add transformation step."""
+        if output_column is None:
+            output_column = self._default_output_column(column, transformation)
         self.steps.append(TransformationStep(
             column=column,
             transformation=transformation,
             params=params or {},
-            output_column=output_column or f"{column}_{transformation.value}"
+            output_column=output_column
         ))
     
-    def transform(self, df: pd.DataFrame) -> TransformationResult:
-        """Apply all transformations."""
+    def transform(
+        self,
+        df: pd.DataFrame,
+        column: str = None,
+        transform_type: TransformationType = None,
+        params: Dict[str, Any] = None,
+        output_column: str = None,
+    ) -> TransformationResult:
+        """Apply a single transformation (preferred) or the queued transformation steps."""
         start_time = datetime.now()
         
         result_df = df.copy()
         steps_applied = []
         n_added = 0
-        
-        for step in self.steps:
+
+        steps: List[TransformationStep]
+        if column is not None and transform_type is not None:
+            steps = [
+                TransformationStep(
+                    column=column,
+                    transformation=transform_type,
+                    params=params or {},
+                    output_column=output_column or self._default_output_column(column, transform_type),
+                )
+            ]
+        else:
+            steps = list(self.steps)
+
+        for step in steps:
             if step.column not in result_df.columns:
                 continue
             
@@ -141,11 +163,20 @@ class DataTransformationEngine:
         
         return TransformationResult(
             transformed_df=result_df,
-            n_columns_transformed=len(self.steps),
+            n_columns_transformed=len(steps),
             n_columns_added=n_added,
             steps_applied=steps_applied,
             processing_time_sec=processing_time
         )
+
+    def _default_output_column(self, column: str, transformation: TransformationType) -> str:
+        if transformation == TransformationType.STANDARDIZE:
+            suffix = "standardized"
+        elif transformation == TransformationType.NORMALIZE:
+            suffix = "normalized"
+        else:
+            suffix = transformation.value
+        return f"{column}_{suffix}"
     
     def _log_transform(self, col: pd.Series) -> pd.Series:
         """Log transformation with handling for zeros/negatives."""

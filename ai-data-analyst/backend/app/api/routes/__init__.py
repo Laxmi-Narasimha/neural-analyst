@@ -3,7 +3,7 @@
 
 from fastapi import APIRouter
 
-from app.api.routes import datasets, chat, analyses, auth, ml, analytics, connections, data_quality
+from app.api.routes import datasets, chat, analyses, auth, ml, analytics, connections, data_quality, data_speaks
 
 # Create main router
 api_router = APIRouter()
@@ -17,6 +17,7 @@ api_router.include_router(ml.router, prefix="/ml", tags=["Machine Learning"])
 api_router.include_router(analytics.router, prefix="/analytics", tags=["Analytics"])
 api_router.include_router(connections.router, prefix="/connections", tags=["Database Connections"])
 api_router.include_router(data_quality.router, prefix="/quality", tags=["Data Quality"])
+api_router.include_router(data_speaks.router, prefix="/data-speaks", tags=["Data Speaks"])
 
 __all__ = [
     "api_router",
@@ -28,5 +29,6 @@ __all__ = [
     "analytics",
     "connections",
     "data_quality",
+    "data_speaks",
 ]
 

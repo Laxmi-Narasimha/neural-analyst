@@ -346,6 +346,20 @@ class FileParseException(FileException):
         self.parse_errors = parse_errors or []
 
 
+class FileNotFoundException(FileException):
+    """Exception when a referenced file is missing on disk/object storage."""
+
+    def __init__(self, filename: str, **kwargs: Any) -> None:
+        super().__init__(
+            message=f"File not found: '{filename}'",
+            error_code=ErrorCode.FILE_NOT_FOUND,
+            http_status_code=404,
+            recovery_hint="Re-upload the file or verify the dataset asset location",
+            **kwargs,
+        )
+        self.filename = filename
+
+
 # ============================================================================
 # Database Exceptions
 # ============================================================================

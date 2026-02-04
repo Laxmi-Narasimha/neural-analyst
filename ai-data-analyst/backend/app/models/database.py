@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     JSON,
+    Uuid,
     Index,
     UniqueConstraint,
     event
@@ -32,6 +33,13 @@ from sqlalchemy.orm import (
     declared_attr
 )
 from enum import Enum
+
+
+# Dialect-agnostic type helpers: use Postgres-native types where available, but
+# allow local dev on SQLite without rewriting the ORM.
+UUID_TYPE = Uuid(as_uuid=True).with_variant(PGUUID(as_uuid=True), "postgresql")
+JSON_TYPE = JSON().with_variant(JSONB(), "postgresql")
+STRING_ARRAY_TYPE = JSON().with_variant(ARRAY(String), "postgresql")
 
 
 # ============================================================================
@@ -97,6 +105,22 @@ class AgentType(str, Enum):
     RESEARCH = "research"
 
 
+class ArtifactType(str, Enum):
+    """Persisted compute artifacts (tables, metrics, charts, reports)."""
+    METRIC = "metric"
+    TABLE = "table"
+    CHART = "chart"
+    REPORT = "report"
+
+
+class AdequacySessionStatus(str, Enum):
+    """Status of a data adequacy / readiness validation session."""
+    QUESTIONS = "questions"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 # ============================================================================
 # Base Model with Mixins
 # ============================================================================
@@ -110,9 +134,9 @@ class Base(AsyncAttrs, DeclarativeBase):
     """
     
     type_annotation_map = {
-        dict[str, Any]: JSONB,
-        list[str]: ARRAY(String),
-        UUID: PGUUID(as_uuid=True)
+        dict[str, Any]: JSON_TYPE,
+        list[str]: STRING_ARRAY_TYPE,
+        UUID: UUID_TYPE,
     }
 
 
@@ -178,12 +202,12 @@ class AuditMixin:
     """
     
     created_by: Mapped[Optional[UUID]] = mapped_column(
-        PGUUID(as_uuid=True),
+        UUID_TYPE,
         nullable=True
     )
     
     updated_by: Mapped[Optional[UUID]] = mapped_column(
-        PGUUID(as_uuid=True),
+        UUID_TYPE,
         nullable=True
     )
 
@@ -197,7 +221,7 @@ class UUIDMixin:
     """
     
     id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
+        UUID_TYPE,
         primary_key=True,
         default=uuid4
     )
@@ -224,7 +248,7 @@ class User(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     
     # Profile settings
-    settings: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    settings: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
     
     # Relationships
     datasets: Mapped[list["Dataset"]] = relationship(
@@ -236,6 +260,16 @@ class User(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
         "Analysis",
         back_populates="owner",
         lazy="selectin"
+    )
+    artifacts: Mapped[list["Artifact"]] = relationship(
+        "Artifact",
+        back_populates="owner",
+        lazy="selectin"
+    )
+    adequacy_sessions: Mapped[list["DataAdequacySession"]] = relationship(
+        "DataAdequacySession",
+        back_populates="owner",
+        lazy="selectin",
     )
     
     def __repr__(self) -> str:
@@ -273,26 +307,26 @@ class Dataset(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
     # Schema info (populated after processing)
     row_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     column_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    schema_info: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    schema_info: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
     
     # Data quality metrics
     quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    quality_report: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    quality_report: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
     
     # Profiling results
-    profile_report: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    profile_report: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
     
     # Vector store info
     vector_namespace: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     embedding_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     
     # Tags and metadata
-    tags: Mapped[list[str]] = mapped_column(ARRAY(String), default=list, nullable=False)
-    extra_data: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    tags: Mapped[list[str]] = mapped_column(STRING_ARRAY_TYPE, default=list, nullable=False)
+    extra_data: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
     
     # Relationships
     owner_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True
@@ -307,6 +341,11 @@ class Dataset(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
     )
     analyses: Mapped[list["Analysis"]] = relationship(
         "Analysis",
+        back_populates="dataset",
+        lazy="selectin"
+    )
+    artifacts: Mapped[list["Artifact"]] = relationship(
+        "Artifact",
         back_populates="dataset",
         lazy="selectin"
     )
@@ -347,18 +386,18 @@ class DatasetColumn(Base, UUIDMixin, TimestampMixin):
     
     # Distribution info
     distribution_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    value_distribution: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    value_distribution: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
     
     # Quality flags
     has_outliers: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_sensitive: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     
     # Full statistics
-    statistics: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    statistics: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
     
     # Relationship
     dataset_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("datasets.id", ondelete="CASCADE"),
         nullable=False
     )
@@ -388,7 +427,7 @@ class Analysis(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
         nullable=False,
         index=True
     )
-    config: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
     
     # Status tracking
     status: Mapped[AnalysisStatus] = mapped_column(
@@ -406,20 +445,20 @@ class Analysis(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
     duration_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     
     # Results
-    results: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    insights: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
-    visualizations: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    results: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    insights: Mapped[list[dict[str, Any]]] = mapped_column(JSON_TYPE, default=list, nullable=False)
+    visualizations: Mapped[list[dict[str, Any]]] = mapped_column(JSON_TYPE, default=list, nullable=False)
     
     # Error tracking
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_traceback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
     # Agent execution trace
-    agent_trace: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    agent_trace: Mapped[list[dict[str, Any]]] = mapped_column(JSON_TYPE, default=list, nullable=False)
     
     # Relationships
     owner_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
         index=True
@@ -427,7 +466,7 @@ class Analysis(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
     owner: Mapped["User"] = relationship("User", back_populates="analyses")
     
     dataset_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("datasets.id", ondelete="CASCADE"),
         nullable=False,
         index=True
@@ -473,17 +512,17 @@ class MLModel(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
     model_format: Mapped[str] = mapped_column(String(50), nullable=False)  # pickle, onnx, joblib, etc.
     
     # Training configuration
-    hyperparameters: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    feature_names: Mapped[list[str]] = mapped_column(ARRAY(String), default=list, nullable=False)
+    hyperparameters: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    feature_names: Mapped[list[str]] = mapped_column(STRING_ARRAY_TYPE, default=list, nullable=False)
     target_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     
     # Performance metrics
-    training_metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    validation_metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    test_metrics: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    training_metrics: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    validation_metrics: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    test_metrics: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
     
     # Feature importance
-    feature_importance: Mapped[dict[str, float]] = mapped_column(JSONB, default=dict, nullable=False)
+    feature_importance: Mapped[dict[str, float]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
     
     # Model state
     is_deployed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
@@ -495,7 +534,7 @@ class MLModel(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
     
     # Relationships
     analysis_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("analyses.id", ondelete="CASCADE"),
         nullable=False
     )
@@ -517,12 +556,12 @@ class Conversation(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     
     # Context
-    context: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
-    active_dataset_id: Mapped[Optional[UUID]] = mapped_column(PGUUID(as_uuid=True), nullable=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    active_dataset_id: Mapped[Optional[UUID]] = mapped_column(UUID_TYPE, nullable=True)
     
     # Relationships
     user_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False
     )
@@ -555,11 +594,11 @@ class Message(Base, UUIDMixin, TimestampMixin):
     output_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     
     # Agent trace for assistant messages
-    agent_actions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    agent_actions: Mapped[list[dict[str, Any]]] = mapped_column(JSON_TYPE, default=list, nullable=False)
     
     # Relationship
     conversation_id: Mapped[UUID] = mapped_column(
-        PGUUID(as_uuid=True),
+        UUID_TYPE,
         ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=False
     )
@@ -567,6 +606,87 @@ class Message(Base, UUIDMixin, TimestampMixin):
     
     def __repr__(self) -> str:
         return f"<Message(id={self.id}, role='{self.role}')>"
+
+
+class Artifact(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
+    """Indexed compute artifact (file-backed via ArtifactStore)."""
+
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        Index("ix_artifacts_owner_created", "owner_id", "created_at"),
+        Index("ix_artifacts_dataset_created", "dataset_id", "created_at"),
+        Index("ix_artifacts_type_created", "artifact_type", "created_at"),
+    )
+
+    artifact_type: Mapped[ArtifactType] = mapped_column(SQLEnum(ArtifactType), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    manifest_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    data_path: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+
+    preview: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    dataset_version: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    operator_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    operator_params: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+
+    owner_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner: Mapped["User"] = relationship("User", back_populates="artifacts")
+
+    dataset_id: Mapped[Optional[UUID]] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("datasets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    dataset: Mapped[Optional["Dataset"]] = relationship("Dataset", back_populates="artifacts")
+
+    def __repr__(self) -> str:
+        return f"<Artifact(id={self.id}, type={self.artifact_type.value}, name='{self.name}')>"
+
+
+class DataAdequacySession(Base, TimestampMixin, SoftDeleteMixin):
+    """Durable session state for Data Adequacy / Readiness validation."""
+
+    __tablename__ = "data_adequacy_sessions"
+    __table_args__ = (
+        Index("ix_data_adequacy_sessions_owner_created", "owner_id", "created_at"),
+        Index("ix_data_adequacy_sessions_owner_status", "owner_id", "status"),
+    )
+
+    session_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+
+    owner_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner: Mapped["User"] = relationship("User", back_populates="adequacy_sessions")
+
+    dataset_id: Mapped[Optional[UUID]] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("datasets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    status: Mapped[AdequacySessionStatus] = mapped_column(
+        SQLEnum(AdequacySessionStatus),
+        default=AdequacySessionStatus.QUESTIONS,
+        nullable=False,
+        index=True,
+    )
+
+    state: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    llm_calls: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    def __repr__(self) -> str:
+        return f"<DataAdequacySession(session_id={self.session_id}, status={self.status.value})>"
 
 
 # ============================================================================

@@ -2,11 +2,14 @@
 
 import { useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { motion } from 'framer-motion';
 import { IconMail, IconLock, IconUser, IconEye, IconEyeOff, IconArrowRight, IconCheck } from '@/components/icons';
+import api from '@/lib/api';
 import styles from '../login/page.module.css';
 
 export default function RegisterPage() {
+    const router = useRouter();
     const [showPassword, setShowPassword] = useState(false);
     const [formData, setFormData] = useState({
         name: '',
@@ -14,6 +17,7 @@ export default function RegisterPage() {
         password: '',
     });
     const [isLoading, setIsLoading] = useState(false);
+    const [errorMessage, setErrorMessage] = useState(null);
 
     const handleChange = (e) => {
         setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -22,10 +26,16 @@ export default function RegisterPage() {
     const handleSubmit = async (e) => {
         e.preventDefault();
         setIsLoading(true);
-        setTimeout(() => {
+        setErrorMessage(null);
+        try {
+            await api.register(formData.email, formData.password, formData.name, 'analyst');
+            await api.login(formData.email, formData.password);
+            router.replace('/app/dashboard');
+        } catch (err) {
+            setErrorMessage(err?.message || 'Registration failed');
+        } finally {
             setIsLoading(false);
-            window.location.href = '/app/dashboard';
-        }, 1500);
+        }
     };
 
     const passwordStrength = () => {
@@ -57,6 +67,12 @@ export default function RegisterPage() {
                                 Start analyzing data in minutes — free forever
                             </p>
                         </div>
+
+                        {errorMessage && (
+                            <div style={{ color: 'var(--error-500)', fontSize: 14, marginBottom: 12 }}>
+                                {errorMessage}
+                            </div>
+                        )}
 
                         <form onSubmit={handleSubmit} className={styles.form}>
                             <div className={styles.inputGroup}>

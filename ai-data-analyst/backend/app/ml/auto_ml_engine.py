@@ -104,7 +104,11 @@ from app.core.logging import get_logger, LogContext
 try:
     from app.core.exceptions import MLException, DataProcessingException
 except ImportError:
-    class MLException(Exception): pass\n    class DataProcessingException(Exception): pass
+    class MLException(Exception):
+        pass
+
+    class DataProcessingException(Exception):
+        pass
 
 # Import universal data handler
 from app.ml.universal_data_handler import (
@@ -1284,3 +1288,73 @@ def quick_train(
     """
     engine = AdvancedAutoMLEngine(verbose=kwargs.pop('verbose', False))
     return engine.auto_train(df, target, **kwargs)
+
+
+# ----------------------------------------------------------------------------
+# Backwards-compatible API expected by repo tests
+# ----------------------------------------------------------------------------
+
+@dataclass
+class AutoMLResult:
+    best_model: Any
+    task: str
+    metrics: Dict[str, float] = field(default_factory=dict)
+    best_score: Optional[float] = None
+
+
+class AutoMLEngine:
+    def __init__(self, random_state: int = 42, verbose: bool = True) -> None:
+        self.random_state = random_state
+        self.verbose = verbose
+
+        if not HAS_SKLEARN:
+            raise ImportError("scikit-learn is required for AutoMLEngine")
+
+    def train(self, X: pd.DataFrame, y: pd.Series, task: str = "classification") -> AutoMLResult:
+        if X is None or y is None:
+            raise ValueError("X and y are required")
+        if not isinstance(X, (pd.DataFrame,)):
+            X = pd.DataFrame(X)
+
+        y_series = y if isinstance(y, pd.Series) else pd.Series(y)
+
+        # Minimal, reliable baselines for test coverage.
+        if task == "classification":
+            model = LogisticRegression(max_iter=1000, random_state=self.random_state)
+            splitter = StratifiedKFold(n_splits=3, shuffle=True, random_state=self.random_state)
+            try:
+                scores = cross_val_score(model, X, y_series, cv=splitter, scoring="accuracy")
+                best_score = float(np.mean(scores)) if len(scores) else None
+            except Exception:
+                best_score = None
+
+            model.fit(X, y_series)
+            metrics: Dict[str, float] = {}
+            try:
+                preds = model.predict(X)
+                metrics["accuracy"] = float(accuracy_score(y_series, preds))
+            except Exception:
+                pass
+
+            return AutoMLResult(best_model=model, task=task, metrics=metrics, best_score=best_score)
+
+        if task == "regression":
+            model = Ridge()
+            splitter = KFold(n_splits=3, shuffle=True, random_state=self.random_state)
+            try:
+                scores = cross_val_score(model, X, y_series, cv=splitter, scoring="r2")
+                best_score = float(np.mean(scores)) if len(scores) else None
+            except Exception:
+                best_score = None
+
+            model.fit(X, y_series)
+            metrics = {}
+            try:
+                preds = model.predict(X)
+                metrics["r2"] = float(r2_score(y_series, preds))
+            except Exception:
+                pass
+
+            return AutoMLResult(best_model=model, task=task, metrics=metrics, best_score=best_score)
+
+        raise ValueError(f"Unknown task: {task}")

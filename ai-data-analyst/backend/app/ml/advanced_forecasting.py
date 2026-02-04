@@ -28,7 +28,11 @@ from app.core.logging import get_logger
 try:
     from app.core.exceptions import ValidationException, DataProcessingException
 except ImportError:
-    class ValidationException(Exception): pass\n    class DataProcessingException(Exception): pass
+    class ValidationException(Exception):
+        pass
+
+    class DataProcessingException(Exception):
+        pass
 
 logger = get_logger(__name__)
 warnings.filterwarnings('ignore')
@@ -208,6 +212,10 @@ class ForecastResult:
             },
             "warnings": self.warnings[:10]
         }
+
+    @property
+    def predictions(self) -> pd.DataFrame:
+        return self.forecast
 
 
 # ============================================================================
@@ -1271,3 +1279,25 @@ def quick_forecast(
     config = ForecastConfig(horizon=horizon, **kwargs)
     engine = AdvancedForecastEngine(verbose=False)
     return engine.forecast(df, config=config)
+
+
+# ----------------------------------------------------------------------------
+# Backwards-compatible API expected by repo tests
+# ----------------------------------------------------------------------------
+
+class AdvancedForecastingEngine(AdvancedForecastEngine):
+    def forecast(
+        self,
+        df: pd.DataFrame,
+        date_col: Optional[str] = None,
+        value_col: Optional[str] = None,
+        horizon: int = 30,
+        method: Optional[str] = None,
+    ) -> ForecastResult:
+        cfg = ForecastConfig(horizon=horizon)
+        if method:
+            try:
+                cfg.model = ForecastModel(method)
+            except Exception:
+                pass
+        return super().forecast(df, date_col=date_col, value_col=value_col, config=cfg)

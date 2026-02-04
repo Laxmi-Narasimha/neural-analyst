@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Optional
 from uuid import UUID, uuid4
@@ -13,6 +13,9 @@ import secrets
 
 from jose import jwt
 from jose.exceptions import ExpiredSignatureError, JWTError
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.core.exceptions import AuthenticationException, AuthorizationException
@@ -71,7 +74,7 @@ class TokenPayload:
     role: UserRole
     permissions: list[Permission]
     exp: datetime
-    iat: datetime = field(default_factory=datetime.utcnow)
+    iat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     jti: str = field(default_factory=lambda: str(uuid4()))
     
     def to_dict(self) -> dict[str, Any]:
@@ -181,13 +184,15 @@ class JWTService:
     ) -> str:
         """Create JWT access token."""
         permissions = ROLE_PERMISSIONS.get(role, [])
-        
+
+        now = datetime.now(timezone.utc)
         payload = TokenPayload(
             sub=user_id,
             email=email,
             role=role,
             permissions=permissions,
-            exp=datetime.utcnow() + self.access_expire
+            exp=now + self.access_expire,
+            iat=now,
         )
 
         payload_dict = payload.to_dict()
@@ -196,11 +201,12 @@ class JWTService:
     
     def create_refresh_token(self, user_id: str) -> str:
         """Create refresh token."""
+        now = datetime.now(timezone.utc)
         payload = {
             "sub": user_id,
             "type": "refresh",
-            "iat": int(datetime.utcnow().timestamp()),
-            "exp": int((datetime.utcnow() + self.refresh_expire).timestamp()),
+            "iat": int(now.timestamp()),
+            "exp": int((now + self.refresh_expire).timestamp()),
             "jti": str(uuid4()),
         }
         return jwt.encode(payload, self.secret_key, algorithm=self.algorithm)
@@ -219,8 +225,8 @@ class JWTService:
                 email=payload["email"],
                 role=UserRole(payload["role"]),
                 permissions=[Permission(p) for p in payload.get("permissions", [])],
-                exp=datetime.fromtimestamp(payload["exp"]),
-                iat=datetime.fromtimestamp(payload["iat"]),
+                exp=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
+                iat=datetime.fromtimestamp(payload["iat"], tz=timezone.utc),
                 jti=payload["jti"],
             )
         except ExpiredSignatureError:
@@ -319,74 +325,113 @@ class AuthenticationService:
         self.jwt = JWTService()
         self.api_keys = APIKeyService()
         self.hasher = PasswordHasher()
-        
-        # In-memory user store (use database in production)
-        self._users: dict[str, dict] = {}
-        self._sessions: dict[str, dict] = {}
-    
-    def register_user(
+        # In-memory refresh token sessions.
+        # TODO: Persist refresh sessions in DB/Redis to survive restarts.
+        self._sessions: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _role_from_user_record(user: Any) -> UserRole:
+        # Backward compatible mapping until a dedicated role column exists.
+        if getattr(user, "is_superuser", False):
+            return UserRole.ADMIN
+        settings_role = None
+        try:
+            settings_role = (getattr(user, "settings", None) or {}).get("role")
+        except Exception:
+            settings_role = None
+        if settings_role:
+            try:
+                return UserRole(settings_role)
+            except Exception:
+                return UserRole.ANALYST
+        return UserRole.ANALYST
+
+    async def register_user(
         self,
+        db: AsyncSession,
         email: str,
         password: str,
-        role: UserRole = UserRole.ANALYST
+        role: UserRole = UserRole.ANALYST,
+        full_name: str | None = None,
     ) -> dict[str, Any]:
-        """Register a new user."""
-        if email in self._users:
+        """Register a new user in the database."""
+        from app.models import User
+
+        existing = await db.execute(
+            select(User).where(
+                User.email == email,
+                User.is_deleted == False,  # noqa: E712
+            )
+        )
+        if existing.scalars().first():
             raise AuthenticationException("User already exists")
-        
-        user_id = str(uuid4())
-        
-        self._users[email] = {
-            "user_id": user_id,
-            "email": email,
-            "password_hash": self.hasher.hash(password),
-            "role": role,
-            "created_at": datetime.utcnow(),
-            "is_active": True
-        }
-        
+
+        display_name = full_name or email.split("@", 1)[0] or "User"
+
+        user = User(
+            id=uuid4(),
+            email=email,
+            hashed_password=self.hasher.hash(password),
+            full_name=display_name,
+            is_active=True,
+            is_superuser=role == UserRole.ADMIN,
+            is_verified=False,
+            settings={"role": role.value},
+        )
+
+        db.add(user)
+        try:
+            await db.commit()
+        except IntegrityError as e:
+            await db.rollback()
+            raise AuthenticationException("User already exists") from e
+
+        await db.refresh(user)
         return {
-            "user_id": user_id,
-            "email": email,
-            "role": role.value
+            "user_id": str(user.id),
+            "email": user.email,
+            "role": role.value,
         }
-    
-    def authenticate(
+
+    async def authenticate(
         self,
+        db: AsyncSession,
         email: str,
-        password: str
+        password: str,
     ) -> dict[str, str]:
         """Authenticate user and return tokens."""
-        if email not in self._users:
-            raise AuthenticationException("Invalid credentials")
-        
-        user = self._users[email]
-        
-        if not self.hasher.verify(password, user["password_hash"]):
-            raise AuthenticationException("Invalid credentials")
-        
-        if not user["is_active"]:
-            raise AuthenticationException("Account is disabled")
-        
-        # Generate tokens
-        access_token = self.jwt.create_access_token(
-            user["user_id"],
-            email,
-            user["role"]
+        from app.models import User
+
+        result = await db.execute(
+            select(User).where(
+                User.email == email,
+                User.is_deleted == False,  # noqa: E712
+            )
         )
-        
-        refresh_token = self.jwt.create_refresh_token(user["user_id"])
-        
-        # Store session
-        self._sessions[user["user_id"]] = {
+        user = result.scalars().first()
+        if not user:
+            raise AuthenticationException("Invalid credentials")
+
+        if not self.hasher.verify(password, user.hashed_password):
+            raise AuthenticationException("Invalid credentials")
+
+        if not user.is_active:
+            raise AuthenticationException("Account is disabled")
+
+        role = self._role_from_user_record(user)
+
+        access_token = self.jwt.create_access_token(str(user.id), user.email, role)
+        refresh_token = self.jwt.create_refresh_token(str(user.id))
+
+        self._sessions[str(user.id)] = {
             "refresh_token": refresh_token,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.utcnow(),
         }
-        
+
         return {
             "access_token": access_token,
             "refresh_token": refresh_token,
-            "token_type": "bearer"
+            "token_type": "bearer",
         }
     
     def validate_token(self, token: str) -> AuthUser:
@@ -399,9 +444,11 @@ class AuthenticationService:
             role=payload.role,
             permissions=payload.permissions
         )
-    
-    def refresh_tokens(self, refresh_token: str) -> dict[str, str]:
+
+    async def refresh_tokens(self, db: AsyncSession, refresh_token: str) -> dict[str, str]:
         """Refresh access token."""
+        from app.models import User
+
         payload = self.jwt.decode_refresh_token(refresh_token)
         user_id = payload["sub"]
 
@@ -409,24 +456,24 @@ class AuthenticationService:
         if not session or session.get("refresh_token") != refresh_token:
             raise AuthenticationException("Refresh token is not valid for this session")
 
-        # Find user by id
-        user: Optional[dict[str, Any]] = None
-        for u in self._users.values():
-            if u["user_id"] == user_id:
-                user = u
-                break
-
+        result = await db.execute(
+            select(User).where(
+                User.id == UUID(user_id),
+                User.is_deleted == False,  # noqa: E712
+            )
+        )
+        user = result.scalars().first()
         if not user:
             raise AuthenticationException("User not found")
 
-        access_token = self.jwt.create_access_token(
-            user_id=user["user_id"],
-            email=user["email"],
-            role=user["role"],
-        )
-        new_refresh_token = self.jwt.create_refresh_token(user["user_id"])
+        if not user.is_active:
+            raise AuthenticationException("Account is disabled")
 
-        self._sessions[user["user_id"]] = {
+        role = self._role_from_user_record(user)
+        access_token = self.jwt.create_access_token(str(user.id), user.email, role)
+        new_refresh_token = self.jwt.create_refresh_token(str(user.id))
+
+        self._sessions[str(user.id)] = {
             "refresh_token": new_refresh_token,
             "created_at": datetime.utcnow(),
         }

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine
 )
 from sqlalchemy import text
-from sqlalchemy.pool import AsyncAdaptedQueuePool
+from sqlalchemy.pool import AsyncAdaptedQueuePool, NullPool
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -44,18 +44,30 @@ class DatabaseManager:
     def engine(self) -> AsyncEngine:
         """Get or create the async engine."""
         if self._engine is None:
-            self._engine = create_async_engine(
-                settings.database.async_url,
-                echo=settings.database.echo,
-                pool_size=settings.database.pool_size,
-                max_overflow=settings.database.max_overflow,
-                pool_timeout=settings.database.pool_timeout,
-                pool_recycle=settings.database.pool_recycle,
-                poolclass=AsyncAdaptedQueuePool,
-                # Production optimizations
-                pool_pre_ping=True,  # Validate connections before use
-                future=True,
-            )
+            url = settings.database.async_url
+
+            # Support a lightweight local dev DB without Postgres.
+            if url.startswith("sqlite"):
+                self._engine = create_async_engine(
+                    url,
+                    echo=settings.database.echo,
+                    future=True,
+                    poolclass=NullPool,
+                    connect_args={"check_same_thread": False},
+                )
+            else:
+                self._engine = create_async_engine(
+                    url,
+                    echo=settings.database.echo,
+                    pool_size=settings.database.pool_size,
+                    max_overflow=settings.database.max_overflow,
+                    pool_timeout=settings.database.pool_timeout,
+                    pool_recycle=settings.database.pool_recycle,
+                    poolclass=AsyncAdaptedQueuePool,
+                    # Production optimizations
+                    pool_pre_ping=True,  # Validate connections before use
+                    future=True,
+                )
             logger.info(
                 "Database engine created",
                 pool_size=settings.database.pool_size,

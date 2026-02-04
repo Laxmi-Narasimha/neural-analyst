@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { notFound } from 'next/navigation';
 import { IconArrowRight, IconCheck, IconChart, IconBrain, IconDatabase, IconTrend, IconShield, IconUsers } from '@/components/icons';
 import styles from './page.module.css';
 
@@ -80,15 +81,24 @@ export async function generateStaticParams() {
 }
 
 export async function generateMetadata({ params }) {
-    const solution = solutionsData[params.id];
+    const { id } = await Promise.resolve(params);
+    const solution = solutionsData[id];
+    if (!solution) {
+        return {
+            title: 'NeuralAnalyst Solutions',
+            description: 'NeuralAnalyst solutions for different teams.',
+        };
+    }
     return {
         title: `${solution.title} - NeuralAnalyst Solutions`,
         description: solution.description,
     };
 }
 
-export default function SolutionDetailPage({ params }) {
-    const solution = solutionsData[params.id];
+export default async function SolutionDetailPage({ params }) {
+    const { id } = await Promise.resolve(params);
+    const solution = solutionsData[id];
+    if (!solution) notFound();
 
     return (
         <main className={styles.main}>
