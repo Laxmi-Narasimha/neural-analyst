@@ -20,7 +20,11 @@ from app.core.logging import get_logger, LogContext
 try:
     from app.core.exceptions import DataProcessingException, ValidationException
 except ImportError:
-    class DataProcessingException(Exception): pass\n    class ValidationException(Exception): pass
+    class DataProcessingException(Exception):
+        pass
+
+    class ValidationException(Exception):
+        pass
 
 logger = get_logger(__name__)
 

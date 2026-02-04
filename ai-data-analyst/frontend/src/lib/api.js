@@ -1,11 +1,19 @@
 // AI Enterprise Data Analyst - API Client
 // Connects frontend to backend services
 
+import { clearTokens, getAccessToken, setTokens } from './auth';
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
 class APIClient {
     constructor() {
         this.baseUrl = API_BASE_URL;
+    }
+
+    _unwrapApiResponse(response) {
+        if (!response || typeof response !== 'object') return response;
+        if (Object.prototype.hasOwnProperty.call(response, 'data')) return response.data;
+        return response;
     }
 
     _normalizeListResponse(response) {
@@ -32,9 +40,11 @@ class APIClient {
     async request(endpoint, options = {}) {
         const url = `${this.baseUrl}${endpoint}`;
 
+        const token = getAccessToken();
         const config = {
             headers: {
                 'Content-Type': 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
                 ...options.headers,
             },
             ...options,
@@ -44,6 +54,9 @@ class APIClient {
             const response = await fetch(url, config);
 
             if (!response.ok) {
+                if (response.status === 401) {
+                    clearTokens();
+                }
                 const error = await response.json().catch(() => ({ detail: 'Request failed' }));
                 throw new Error(error.detail || `HTTP ${response.status}`);
             }
@@ -66,9 +79,11 @@ class APIClient {
         if (description) formData.append('description', description);
         if (tags.length) formData.append('tags', tags.join(','));
 
+        const token = getAccessToken();
         const response = await fetch(`${this.baseUrl}/datasets/upload`, {
             method: 'POST',
             body: formData,
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
 
         if (!response.ok) {
@@ -76,7 +91,8 @@ class APIClient {
             throw new Error(error.detail || 'Upload failed');
         }
 
-        return await response.json();
+        const json = await response.json();
+        return this._unwrapApiResponse(json);
     }
 
     async listDatasets(page = 1, pageSize = 20, search = '') {
@@ -87,15 +103,18 @@ class APIClient {
     }
 
     async getDataset(datasetId) {
-        return this.request(`/datasets/${datasetId}`);
+        const response = await this.request(`/datasets/${datasetId}`);
+        return this._unwrapApiResponse(response);
     }
 
     async deleteDataset(datasetId) {
-        return this.request(`/datasets/${datasetId}`, { method: 'DELETE' });
+        const response = await this.request(`/datasets/${datasetId}`, { method: 'DELETE' });
+        return this._unwrapApiResponse(response);
     }
 
     async processDataset(datasetId) {
-        return this.request(`/datasets/${datasetId}/process`, { method: 'POST' });
+        const response = await this.request(`/datasets/${datasetId}/process`, { method: 'POST' });
+        return this._unwrapApiResponse(response);
     }
 
     // ============================================================================
@@ -103,7 +122,7 @@ class APIClient {
     // ============================================================================
 
     async sendMessage(message, conversationId = null, datasetId = null, context = {}) {
-        return this.request('/chat', {
+        const response = await this.request('/chat', {
             method: 'POST',
             body: JSON.stringify({
                 message,
@@ -112,6 +131,7 @@ class APIClient {
                 context,
             }),
         });
+        return this._unwrapApiResponse(response);
     }
 
     async listConversations(page = 1, pageSize = 20) {
@@ -211,6 +231,106 @@ class APIClient {
     async listModels() {
         const response = await this.request('/ml/models');
         return this._normalizeListResponse(response);
+    }
+
+    // ============================================================================
+    // Data Speaks / Artifacts
+    // ============================================================================
+
+    async runDataSpeaks(datasetId, plan = null) {
+        const response = await this.request('/data-speaks/run', {
+            method: 'POST',
+            body: JSON.stringify({
+                dataset_id: datasetId,
+                plan,
+            }),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
+    async getArtifactManifest(artifactId) {
+        const response = await this.request(`/data-speaks/artifacts/${artifactId}`);
+        return this._unwrapApiResponse(response);
+    }
+
+    async downloadArtifactData(artifactId) {
+        const token = getAccessToken();
+        const response = await fetch(`${this.baseUrl}/data-speaks/artifacts/${artifactId}/download`, {
+            method: 'GET',
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+
+        if (!response.ok) {
+            if (response.status === 401) clearTokens();
+            const error = await response.json().catch(() => ({ detail: 'Download failed' }));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+        }
+
+        return await response.blob();
+    }
+
+    // ============================================================================
+    // Analyses (persisted jobs)
+    // ============================================================================
+
+    async createAnalysis(name, datasetId, analysisType = 'eda', config = {}) {
+        const response = await this.request('/analyses', {
+            method: 'POST',
+            body: JSON.stringify({
+                name,
+                dataset_id: datasetId,
+                analysis_type: analysisType,
+                config,
+            }),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
+    async listAnalyses(page = 1, pageSize = 20, datasetId = null) {
+        const params = new URLSearchParams({ page, page_size: pageSize });
+        if (datasetId) params.append('dataset_id', datasetId);
+        const response = await this.request(`/analyses?${params}`);
+        return this._normalizeListResponse(response);
+    }
+
+    async getAnalysis(analysisId) {
+        const response = await this.request(`/analyses/${analysisId}`);
+        return this._unwrapApiResponse(response);
+    }
+
+    // ============================================================================
+    // Auth APIs
+    // ============================================================================
+
+    async register(email, password, fullName, role = 'analyst') {
+        return this.request('/auth/register', {
+            method: 'POST',
+            body: JSON.stringify({
+                email,
+                password,
+                full_name: fullName,
+                role,
+            }),
+        });
+    }
+
+    async login(email, password) {
+        const tokens = await this.request('/auth/login', {
+            method: 'POST',
+            body: JSON.stringify({ email, password }),
+        });
+        if (tokens?.access_token) {
+            setTokens(tokens.access_token, tokens.refresh_token);
+        }
+        return tokens;
+    }
+
+    async logout() {
+        try {
+            await this.request('/auth/logout', { method: 'POST' });
+        } finally {
+            clearTokens();
+        }
     }
 }
 

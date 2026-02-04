@@ -917,3 +917,8 @@ def quick_detect_anomalies(
     method_enum = AnomalyMethod(method) if method != "auto" else AnomalyMethod.AUTO
     result = engine.detect(df, columns=columns, method=method_enum)
     return result.to_dict()
+
+
+# Backwards-compatible names expected by repo tests
+DetectionMethod = AnomalyMethod
+AdvancedAnomalyDetectionEngine = AdvancedAnomalyEngine

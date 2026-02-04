@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, BinaryIO, Optional, Type
+from typing import Any, BinaryIO, IO, Optional, Type
 
 import pandas as pd
 import numpy as np
@@ -571,11 +571,17 @@ class DataIngestionService:
             format=file_format.value
         )
         
-        # Calculate file hash and size
+        # Calculate file hash and size without reading the entire file into memory.
         file_data.seek(0)
-        content = file_data.read()
-        file_hash = hashlib.sha256(content).hexdigest()
-        file_size = len(content)
+        hasher = hashlib.sha256()
+        file_size = 0
+        while True:
+            chunk = file_data.read(1024 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+            file_size += len(chunk)
+        file_hash = hasher.hexdigest()
         file_data.seek(0)
         
         # Parse file
@@ -602,6 +608,24 @@ class DataIngestionService:
         )
         
         return df, profile
+
+    def parse_file(
+        self,
+        file_data: IO[bytes],
+        filename: str,
+        file_format: Optional[FileFormat] = None,
+        **parse_options: Any,
+    ) -> pd.DataFrame:
+        """
+        Parse a dataset file into a DataFrame without profiling.
+
+        This is used by compute paths that only need the DataFrame and want to
+        avoid recomputing profiles on every load.
+        """
+        if file_format is None:
+            file_format = self.detect_format(filename)
+        parser = self.get_parser(file_format)
+        return parser.parse(file_data, filename, **parse_options)
     
     def _generate_profile(
         self,

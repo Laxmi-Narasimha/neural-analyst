@@ -456,5 +456,3 @@ class DataProfilingEngine:
 def get_data_profiling_engine() -> DataProfilingEngine:
     """Get data profiling engine instance."""
     return DataProfilingEngine()
-</Parameter>
-<parameter name="Complexity">8

@@ -98,6 +98,10 @@ class KeywordResult:
             ][:10]
         }
 
+    @property
+    def keywords(self) -> List[Keyword]:
+        return self.global_keywords
+
 
 # ============================================================================
 # Text Preprocessor

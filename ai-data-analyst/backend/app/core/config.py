@@ -251,6 +251,7 @@ class Settings(BaseSettings):
         default=["csv", "xlsx", "xls", "json", "parquet", "pdf", "docx", "txt"]
     )
     upload_directory: Path = Field(default=Path("./uploads"))
+    artifact_directory: Path = Field(default=Path("./artifacts"))
     
     # Nested configurations
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -261,7 +262,7 @@ class Settings(BaseSettings):
     security: SecurityConfig = Field(default_factory=lambda: SecurityConfig(secret_key=SecretStr(os.getenv("SECRET_KEY", "dev-secret-key"))))
     ml: MLConfig = Field(default_factory=MLConfig)
     
-    @field_validator("upload_directory")
+    @field_validator("upload_directory", "artifact_directory")
     @classmethod
     def ensure_directory_exists(cls, v: Any) -> Any:
         """Ensure directories exist on initialization."""

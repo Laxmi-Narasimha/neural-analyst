@@ -123,6 +123,13 @@ class SentimentResult:
         }
 
 
+@dataclass
+class SingleSentimentResult:
+    sentiment: str
+    polarity: float = 0.0
+    confidence: float = 0.0
+
+
 # ============================================================================
 # Sentiment Analyzers
 # ============================================================================
@@ -212,12 +219,23 @@ class SentimentAnalysisEngine:
         self.textblob = TextBlobAnalyzer()
         self.lexicon = LexiconAnalyzer()
     
-    def analyze(
-        self,
-        df: pd.DataFrame,
-        text_col: str = None
-    ) -> SentimentResult:
-        """Perform sentiment analysis."""
+    def analyze(self, df: Any, text_col: str = None):
+        """Perform sentiment analysis on a DataFrame or a single text string."""
+        if isinstance(df, str):
+            score = self._analyze_text(df)
+            label = score.label
+            if label in (SentimentLabel.VERY_NEGATIVE, SentimentLabel.NEGATIVE):
+                sentiment = "negative"
+            elif label in (SentimentLabel.VERY_POSITIVE, SentimentLabel.POSITIVE):
+                sentiment = "positive"
+            else:
+                sentiment = "neutral"
+            return SingleSentimentResult(
+                sentiment=sentiment,
+                polarity=float(score.polarity),
+                confidence=float(score.confidence),
+            )
+
         start_time = datetime.now()
         
         # Auto-detect text column

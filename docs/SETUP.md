@@ -1,79 +1,83 @@
-# Setup (macOS)
+# Setup
 
 This repo currently requires:
 
-- **Python 3.11+** (the `ai-data-analyst` backend uses Python 3.10+ syntax and declares 3.11+)
-- **Node >= 20.9.0** (required by the installed `next@16.0.7` engine in `ai-data-analyst/frontend`)
+- Python 3.11+
+- Node 20.9+ (the Next.js app uses `.nvmrc`)
 
-## 1) Install Node (recommended: nvm)
+Optional (recommended for production-like runs):
 
-```bash
-brew install nvm
-mkdir -p ~/.nvm
-```
+- Postgres (primary DB target)
+- Redis (for distributed rate limiting + background jobs when enabled)
 
-Add this to your shell profile (`~/.zshrc`):
+## Windows (PowerShell)
 
-```bash
-export NVM_DIR="$HOME/.nvm"
-source "$(brew --prefix nvm)/nvm.sh"
-```
+### 1) Verify toolchain
 
-Then:
-
-```bash
-cd /Users/laxmi/Downloads/data_analyst
-nvm install
-nvm use
-node -v
-```
-
-## 2) Install Python 3.11+
-
-Option A (Homebrew):
-
-```bash
-brew install python@3.11
-python3.11 --version
-```
-
-Option B (pyenv):
-
-```bash
-brew install pyenv
-pyenv install 3.11.9
-pyenv local 3.11.9
+```powershell
 python --version
+node --version
+npm --version
 ```
 
-## 3) Optional: PostgreSQL (for full `ai-data-analyst` functionality)
+### 2) Run the Analyst app (FastAPI + Next.js)
 
-The analyst backend is designed around Postgres + SQLAlchemy async.
+Backend:
 
-```bash
-brew install postgresql@14
-brew services start postgresql@14
-createdb ai_data_analyst
+```powershell
+cd neural-analyst\ai-data-analyst\backend
+if (!(Test-Path .\.venv)) { python -m venv .venv }
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# Use SQLite for local dev (no Postgres required)
+$env:DATABASE_URL="sqlite+aiosqlite:///./dev.db"
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 
-Then copy and edit:
+Frontend (new terminal):
 
-```bash
-cd ai-data-analyst/backend
-cp .env.example .env
+```powershell
+cd neural-analyst\ai-data-analyst\frontend
+npm ci
+$env:NEXT_PUBLIC_API_URL="http://localhost:8000/api/v1"
+npm run dev
 ```
 
-## 4) Run
+Open: `http://localhost:3000`
+
+## macOS / Linux
+
+Backend:
 
 ```bash
-cd /Users/laxmi/Downloads/data_analyst
-make setup
-make dev-analyst
+cd neural-analyst/ai-data-analyst/backend
+python3 -m venv .venv
+./.venv/bin/python -m pip install -r requirements.txt
+export DATABASE_URL="sqlite+aiosqlite:///./dev.db"
+./.venv/bin/python -m uvicorn app.main:app --reload --port 8000
 ```
 
-Or:
+Frontend:
 
 ```bash
-make dev-validator
+cd neural-analyst/ai-data-analyst/frontend
+npm ci
+export NEXT_PUBLIC_API_URL="http://localhost:8000/api/v1"
+npm run dev
+```
+
+## Production Notes (high level)
+
+- Prefer Postgres: `DATABASE_URL="postgresql+asyncpg://user:pass@host:5432/db"`
+- Do not use `create_all`/auto-create in production; use migrations (Alembic) once wired.
+- Run background jobs out-of-process (Celery/Redis) for long dataset processing and heavy compute.
+
+## Optional: Postgres + Redis via Docker
+
+If you have Docker running locally:
+
+```bash
+cd neural-analyst
+docker compose up -d
 ```
 

@@ -8,6 +8,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.auth_service import (
     AuthenticationService,
@@ -18,6 +20,7 @@ from app.services.auth_service import (
 )
 from app.core.exceptions import AuthenticationException, AuthorizationException
 from app.core.logging import get_logger
+from app.services.database import get_db_session
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -31,6 +34,7 @@ class RegisterRequest(BaseModel):
     """User registration request."""
     email: EmailStr
     password: str = Field(..., min_length=8)
+    full_name: Optional[str] = None
     role: Optional[str] = "analyst"
 
 
@@ -81,6 +85,7 @@ class APIKeyResponse(BaseModel):
 
 async def get_current_user(
     authorization: str = Header(None),
+    db: AsyncSession = Depends(get_db_session),
     auth_service: AuthenticationService = Depends(get_auth_service)
 ) -> AuthUser:
     """Extract and validate user from token."""
@@ -102,7 +107,26 @@ async def get_current_user(
     token = parts[1]
     
     try:
-        return auth_service.validate_token(token)
+        user = auth_service.validate_token(token)
+
+        # Enforce that the user exists/is active in the DB (FKs rely on this).
+        from app.models import User
+
+        result = await db.execute(
+            select(User).where(
+                User.id == user.user_id,
+                User.is_deleted == False,  # noqa: E712
+            )
+        )
+        db_user = result.scalars().first()
+        if not db_user or not db_user.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User is not active",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        return user
     except AuthenticationException as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -146,16 +170,19 @@ def require_admin():
 @router.post("/register", response_model=dict)
 async def register(
     request: RegisterRequest,
+    db: AsyncSession = Depends(get_db_session),
     auth_service: AuthenticationService = Depends(get_auth_service)
 ):
     """Register a new user."""
     try:
         role = UserRole(request.role) if request.role else UserRole.ANALYST
         
-        result = auth_service.register_user(
+        result = await auth_service.register_user(
+            db=db,
             email=request.email,
             password=request.password,
-            role=role
+            role=role,
+            full_name=request.full_name,
         )
         
         return {
@@ -174,11 +201,13 @@ async def register(
 @router.post("/login", response_model=TokenResponse)
 async def login(
     request: LoginRequest,
+    db: AsyncSession = Depends(get_db_session),
     auth_service: AuthenticationService = Depends(get_auth_service)
 ):
     """Authenticate user and return tokens."""
     try:
-        tokens = auth_service.authenticate(
+        tokens = await auth_service.authenticate(
+            db=db,
             email=request.email,
             password=request.password
         )
@@ -198,11 +227,12 @@ async def login(
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
     request: RefreshRequest,
+    db: AsyncSession = Depends(get_db_session),
     auth_service: AuthenticationService = Depends(get_auth_service)
 ):
     """Refresh access token."""
     try:
-        tokens = auth_service.refresh_tokens(request.refresh_token)
+        tokens = await auth_service.refresh_tokens(db=db, refresh_token=request.refresh_token)
         
         return TokenResponse(
             access_token=tokens["access_token"],
@@ -280,17 +310,23 @@ async def revoke_api_key(
 # Admin routes
 @router.get("/admin/users", dependencies=[Depends(require_admin())])
 async def list_users(
-    auth_service: AuthenticationService = Depends(get_auth_service)
+    db: AsyncSession = Depends(get_db_session),
 ):
     """List all users (admin only)."""
-    users = [
-        {
-            "user_id": u["user_id"],
-            "email": email,
-            "role": u["role"].value,
-            "is_active": u["is_active"],
-            "created_at": u["created_at"].isoformat()
-        }
-        for email, u in auth_service._users.items()
-    ]
+    from app.models import User
+
+    result = await db.execute(select(User).where(User.is_deleted == False))  # noqa: E712
+    users = []
+    for u in result.scalars().all():
+        users.append(
+            {
+                "user_id": str(u.id),
+                "email": u.email,
+                "full_name": u.full_name,
+                "is_active": u.is_active,
+                "is_superuser": u.is_superuser,
+                "is_verified": u.is_verified,
+                "created_at": u.created_at.isoformat(),
+            }
+        )
     return {"users": users, "total": len(users)}

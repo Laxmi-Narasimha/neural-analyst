@@ -10,6 +10,7 @@ import styles from './page.module.css';
 export default function DatasetsPage() {
     const [datasets, setDatasets] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [loadError, setLoadError] = useState(null);
     const [searchQuery, setSearchQuery] = useState('');
     const [dragActive, setDragActive] = useState(false);
     const [uploading, setUploading] = useState(false);
@@ -26,15 +27,13 @@ export default function DatasetsPage() {
     const loadDatasets = async () => {
         try {
             setLoading(true);
+            setLoadError(null);
             const response = await api.listDatasets(1, 50, searchQuery);
             setDatasets(response.items || []);
         } catch (error) {
             console.error('Failed to load datasets:', error);
-            // Use mock data as fallback
-            setDatasets([
-                { id: '1', name: 'sales_2024.csv', row_count: 45234, column_count: 12, file_size: 4400000, updated_at: new Date().toISOString(), file_format: 'csv' },
-                { id: '2', name: 'customers.parquet', row_count: 128500, column_count: 28, file_size: 16500000, updated_at: new Date().toISOString(), file_format: 'parquet' },
-            ]);
+            setLoadError(error?.message || 'Failed to load datasets');
+            setDatasets([]);
         } finally {
             setLoading(false);
         }
@@ -68,6 +67,30 @@ export default function DatasetsPage() {
         }
     };
 
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const waitForDatasetProcessed = async (datasetId, { timeoutMs = 2 * 60 * 1000 } = {}) => {
+        const deadline = Date.now() + timeoutMs;
+        let attempt = 0;
+
+        while (Date.now() < deadline) {
+            const dataset = await api.getDataset(datasetId);
+            const status = String(dataset?.status || '').toLowerCase();
+
+            if (status === 'ready') return dataset;
+            if (status === 'error') {
+                const msg = dataset?.error_message || 'Dataset processing failed';
+                throw new Error(msg);
+            }
+
+            attempt += 1;
+            const delay = Math.min(2500, 400 + attempt * 200);
+            await sleep(delay);
+        }
+
+        throw new Error('Timed out waiting for dataset processing to complete');
+    };
+
     const uploadFile = async (file) => {
         // Validate file type
         const validTypes = ['.csv', '.xlsx', '.xls', '.json', '.parquet', '.tsv'];
@@ -88,19 +111,33 @@ export default function DatasetsPage() {
             setUploadError(null);
             setUploadProgress(0);
 
-            // Simulate progress (actual XHR progress would be better)
+            // Simulate progress (XHR progress would be better; fetch doesn't support it).
             const progressInterval = setInterval(() => {
                 setUploadProgress(prev => Math.min(prev + 10, 90));
             }, 200);
 
-            const result = await api.uploadDataset(file, file.name);
+            const uploaded = await api.uploadDataset(file, file.name);
+            const datasetId = uploaded?.dataset_id;
+
+            if (datasetId) {
+                setUploadSuccess(`Uploaded ${file.name}. Processing started...`);
+            } else {
+                setUploadSuccess(`Successfully uploaded ${file.name}`);
+            }
 
             clearInterval(progressInterval);
             setUploadProgress(100);
-            setUploadSuccess(`Successfully uploaded ${file.name}`);
 
             // Refresh dataset list
             await loadDatasets();
+
+            if (datasetId) {
+                const processed = await waitForDatasetProcessed(datasetId);
+                setUploadSuccess(
+                    `Processed ${processed?.name || file.name} (${(processed?.row_count || 0).toLocaleString()} rows, ${processed?.column_count || 0} columns)`
+                );
+                await loadDatasets();
+            }
 
             // Clear success message after 3 seconds
             setTimeout(() => setUploadSuccess(null), 3000);
@@ -133,8 +170,30 @@ export default function DatasetsPage() {
     };
 
     const filteredDatasets = datasets.filter(d =>
-        d.name.toLowerCase().includes(searchQuery.toLowerCase())
+        String(d?.name || '').toLowerCase().includes(searchQuery.toLowerCase())
     );
+
+    const renderDatasetMeta = (dataset) => {
+        const status = String(dataset?.status || '').toLowerCase();
+
+        if (status === 'ready') {
+            return `${(dataset.row_count || 0).toLocaleString()} rows | ${dataset.column_count || 0} columns | ${formatFileSize(dataset.file_size_bytes || 0)}`;
+        }
+
+        if (status === 'processing') {
+            return `Processing... | ${formatFileSize(dataset.file_size_bytes || 0)}`;
+        }
+
+        if (status === 'pending') {
+            return `Queued... | ${formatFileSize(dataset.file_size_bytes || 0)}`;
+        }
+
+        if (status === 'error') {
+            return `Error | ${dataset.error_message || 'Processing failed'}`;
+        }
+
+        return `${formatFileSize(dataset.file_size_bytes || 0)}`;
+    };
 
     return (
         <div className={styles.page}>
@@ -241,6 +300,17 @@ export default function DatasetsPage() {
                 </div>
             ) : (
                 <div className={styles.datasetList}>
+                    {loadError && (
+                        <motion.div
+                            className={styles.errorMessage}
+                            initial={{ opacity: 0, y: -10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                        >
+                            <IconX size={18} />
+                            {loadError}
+                            <button onClick={() => loadDatasets()}>Retry</button>
+                        </motion.div>
+                    )}
                     {filteredDatasets.map((dataset, index) => (
                         <motion.div
                             key={dataset.id}
@@ -255,13 +325,19 @@ export default function DatasetsPage() {
                             <div className={styles.datasetInfo}>
                                 <h3 className={styles.datasetName}>{dataset.name}</h3>
                                 <p className={styles.datasetMeta}>
-                                    {(dataset.row_count || 0).toLocaleString()} rows • {dataset.column_count || 0} columns • {formatFileSize(dataset.file_size || 0)}
+                                    {renderDatasetMeta(dataset)}
                                 </p>
                             </div>
                             <span className={styles.datasetTime}>{formatDate(dataset.updated_at)}</span>
-                            <Link href={`/app/analysis/new?dataset=${dataset.id}`} className={styles.datasetAction}>
-                                <IconArrowRight size={18} />
-                            </Link>
+                            {String(dataset?.status || '').toLowerCase() === 'ready' ? (
+                                <Link href={`/app/analysis/new?dataset=${dataset.id}`} className={styles.datasetAction}>
+                                    <IconArrowRight size={18} />
+                                </Link>
+                            ) : (
+                                <span className={styles.datasetAction} aria-disabled="true" title="Dataset is not ready yet">
+                                    <IconLoader size={18} className={styles.spinning} />
+                                </span>
+                            )}
                         </motion.div>
                     ))}
                 </div>

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Optional
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
@@ -23,12 +23,32 @@ from app.api.schemas import (
     ConversationResponse,
 )
 from app.core.logging import get_logger, LogContext
+from app.core.serialization import to_jsonable
+from app.compute.executor import ComputeExecutor
+from app.compute.plans import eda_p0_plan
 from app.services.database import get_db_session
+from app.services.dataset_loader import DatasetLoaderService
 from app.services.llm_service import get_llm_service, Message as LLMMessage
+from app.api.routes.auth import require_permission
+from app.services.auth_service import AuthUser, Permission
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+def _artifact_to_dict(a: Any) -> dict[str, Any]:
+    return {
+        "artifact_id": str(getattr(a, "artifact_id", "")),
+        "artifact_type": getattr(getattr(a, "artifact_type", None), "value", None),
+        "name": getattr(a, "name", None),
+        "created_at": getattr(a, "created_at", None),
+        "storage_path": getattr(a, "storage_path", None),
+        "preview": getattr(a, "preview", None),
+        "dataset_id": str(getattr(a, "dataset_id", None)) if getattr(a, "dataset_id", None) else None,
+        "dataset_version": getattr(a, "dataset_version", None),
+        "operator_name": getattr(a, "operator_name", None),
+        "operator_params": getattr(a, "operator_params", None) or {},
+    }
 
 
 # ============================================================================
@@ -178,7 +198,10 @@ class ChatService:
         session: AsyncSession,
         user_id: UUID,
     ) -> None:
+        self._session = session
         self.repo = ConversationRepository(session)
+        self.executor = ComputeExecutor(session)
+        self.dataset_loader = DatasetLoaderService(session)
         self.llm = get_llm_service()
         self.user_id = user_id
     
@@ -215,6 +238,8 @@ class ChatService:
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Conversation not found"
                 )
+            if conversation.user_id != self.user_id:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
         else:
             # Generate title from first message
             title = message[:50] + "..." if len(message) > 50 else message
@@ -223,6 +248,13 @@ class ChatService:
                 title=title,
                 dataset_id=dataset_id
             )
+
+        # Update active dataset if user explicitly sets it.
+        if dataset_id is not None and conversation.active_dataset_id != dataset_id:
+            conversation.active_dataset_id = dataset_id
+            await self._session.commit()
+
+        active_dataset_id = dataset_id or conversation.active_dataset_id
         
         # Store user message
         await self.repo.add_message(
@@ -231,45 +263,103 @@ class ChatService:
             content=message
         )
         
-        # Get conversation history
-        messages = await self.repo.get_messages(conversation.id, limit=20)
-        
-        # Build LLM messages
-        llm_messages = self._build_llm_messages(messages, dataset_id, context)
-        
-        # Generate response
-        logger.info(
-            f"Generating response",
-            context=log_context,
-            conversation_id=str(conversation.id)
-        )
-        
-        try:
-            response = await self.llm.complete(
-                messages=llm_messages,
-                temperature=0.1,
+        # If we have a dataset, prefer compute-grounded responses (no hallucinated numbers).
+        if active_dataset_id is not None:
+            try:
+                await self.dataset_loader.get_dataset_record(
+                    active_dataset_id, owner_id=self.user_id, require_ready=True
+                )
+            except Exception as e:
+                content = (
+                    "Your dataset isn't ready for analysis yet. "
+                    "Please process it first via the Datasets API, then retry.\n\n"
+                    f"Details: {e}"
+                )
+                assistant_msg = await self.repo.add_message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.ASSISTANT.value,
+                    content=content,
+                    agent_actions=[],
+                )
+                return ChatResponse(
+                    conversation_id=conversation.id,
+                    message_id=assistant_msg.id,
+                    content=content,
+                    role=MessageRole.ASSISTANT,
+                    agent_actions=[],
+                    suggestions=["Run dataset processing", "Run Data Speaks (EDA)"],
+                    metadata={"dataset_id": str(active_dataset_id)},
+                )
+
+            plan = self._select_plan(message)
+            sample_rows = 200_000
+            results = await self.executor.run_plan(
+                dataset_id=active_dataset_id,
+                plan=plan,
+                owner_id=self.user_id,
+                sample_rows=sample_rows,
             )
-            
-            # Parse for any agent actions (simplified for now)
-            agent_actions = []
+
+            agent_actions = to_jsonable(
+                [
+                    {
+                        "type": "operator_run",
+                        "operator": r.operator_name,
+                        "summary": r.summary,
+                        "artifacts": [_artifact_to_dict(a) for a in r.artifacts],
+                    }
+                    for r in results
+                ]
+            )
+
+            content = self._format_grounded_response(
+                user_message=message,
+                dataset_id=active_dataset_id,
+                sample_rows=sample_rows,
+                results=results,
+            )
+            suggestions = self._generate_suggestions(message, content)
+
+            assistant_msg = await self.repo.add_message(
+                conversation_id=conversation.id,
+                role=MessageRole.ASSISTANT.value,
+                content=content,
+                agent_actions=agent_actions,
+            )
+
+            return ChatResponse(
+                conversation_id=conversation.id,
+                message_id=assistant_msg.id,
+                content=content,
+                role=MessageRole.ASSISTANT,
+                agent_actions=agent_actions,
+                suggestions=suggestions,
+                metadata={
+                    "dataset_id": str(active_dataset_id),
+                    "sample_rows": sample_rows,
+                },
+            )
+
+        # Otherwise, fall back to an LLM-only assistant (no dataset context).
+        messages = await self.repo.get_messages(conversation.id, limit=20)
+        llm_messages = self._build_llm_messages(messages, None, context)
+
+        logger.info("Generating response", context=log_context, conversation_id=str(conversation.id))
+
+        try:
+            response = await self.llm.complete(messages=llm_messages, temperature=0.1)
+            agent_actions: list[dict[str, Any]] = []
             suggestions = self._generate_suggestions(message, response.content)
-            
-            # Store assistant message
+
             assistant_msg = await self.repo.add_message(
                 conversation_id=conversation.id,
                 role=MessageRole.ASSISTANT.value,
                 content=response.content,
                 agent_actions=agent_actions,
                 input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens
+                output_tokens=response.usage.output_tokens,
             )
-            
-            logger.info(
-                f"Response generated",
-                context=log_context,
-                tokens=response.usage.total_tokens
-            )
-            
+
             return ChatResponse(
                 conversation_id=conversation.id,
                 message_id=assistant_msg.id,
@@ -280,13 +370,95 @@ class ChatService:
                 metadata={
                     "model": response.model,
                     "tokens": response.usage.total_tokens,
-                    "latency_ms": response.latency_ms
-                }
+                    "latency_ms": response.latency_ms,
+                },
             )
-            
         except Exception as e:
             logger.error(f"Chat failed: {e}", context=log_context, exc_info=True)
             raise
+
+    def _select_plan(self, user_message: str) -> list[dict[str, Any]]:
+        msg = (user_message or "").lower()
+
+        if any(k in msg for k in ["eda", "analyze", "analysis", "overview", "summary"]):
+            return eda_p0_plan()
+
+        plan: list[dict[str, Any]] = []
+        if any(k in msg for k in ["schema", "columns", "dtypes"]):
+            plan.append({"operator": "schema_snapshot", "params": {}})
+        if any(k in msg for k in ["preview", "head", "sample"]):
+            plan.append({"operator": "preview_rows", "params": {"limit": 25}})
+        if any(k in msg for k in ["missing", "null", "na", "nan"]):
+            plan.append({"operator": "missingness_scan", "params": {}})
+        if any(k in msg for k in ["correlation", "corr"]):
+            plan.append({"operator": "correlation_matrix", "params": {"max_columns": 25}})
+        if "outlier" in msg:
+            plan.append({"operator": "outlier_scan", "params": {"max_columns": 25}})
+
+        return plan or eda_p0_plan()
+
+    def _format_grounded_response(
+        self,
+        *,
+        user_message: str,
+        dataset_id: UUID,
+        sample_rows: int,
+        results: list[Any],
+    ) -> str:
+        lines: list[str] = []
+        lines.append("I ran safe data operators to answer your question.")
+        lines.append(f"- dataset_id: {dataset_id}")
+        lines.append(f"- sampled_rows: {sample_rows}")
+        lines.append("")
+
+        # Highlights: missingness (if present in this run).
+        for r in results:
+            op = getattr(r, "operator_name", "")
+            if op != "missingness_scan":
+                continue
+
+            lines.append("Missingness (top columns):")
+            preview_rows: list[dict[str, Any]] = []
+            for a in getattr(r, "artifacts", []):
+                if getattr(getattr(a, "artifact_type", None), "value", "") != "table":
+                    continue
+                pr = (getattr(a, "preview", {}) or {}).get("preview_rows")
+                if isinstance(pr, list):
+                    preview_rows = pr
+                    break
+
+            top: list[dict[str, Any]] = []
+            for row in preview_rows:
+                try:
+                    if float(row.get("null_pct", 0.0)) > 0:
+                        top.append(row)
+                except Exception:
+                    continue
+            top = top[:3]
+
+            if top:
+                for row in top:
+                    col = row.get("column")
+                    pct = float(row.get("null_pct", 0.0)) * 100.0
+                    lines.append(f"- {col}: {pct:.2f}% missing")
+            else:
+                lines.append("- No missing values detected in the scanned sample.")
+            lines.append("")
+
+        lines.append("Artifacts (downloadable):")
+        for r in results:
+            op = getattr(r, "operator_name", "")
+            for a in getattr(r, "artifacts", []):
+                aid = getattr(a, "artifact_id", None)
+                if not aid:
+                    continue
+                atype = getattr(getattr(a, "artifact_type", None), "value", "artifact")
+                aname = getattr(a, "name", op)
+                lines.append(f"- {op} -> {atype}: {aname} (artifact_id={aid})")
+
+        lines.append("")
+        lines.append("Tell me what to run next (e.g., 'show correlations', 'top missing columns', 'outliers').")
+        return "\n".join(lines)
     
     def _build_llm_messages(
         self,
@@ -389,7 +561,7 @@ Guidelines:
 async def chat(
     request: ChatRequest,
     db: AsyncSession = Depends(get_db_session),
-    # user_id: UUID = Depends(get_current_user_id),
+    user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS)),
 ):
     """
     Send a chat message and receive AI response.
@@ -401,10 +573,7 @@ async def chat(
     - Create visualizations
     - Provide recommendations
     """
-    # For demo, using a fixed user ID
-    user_id = uuid4()
-    
-    service = ChatService(session=db, user_id=user_id)
+    service = ChatService(session=db, user_id=user.user_id)
     
     response = await service.chat(
         message=request.message,
@@ -426,15 +595,14 @@ async def list_conversations(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.READ_DATA)),
 ):
     """List all conversations for the current user."""
-    user_id = uuid4()
-    
     repo = ConversationRepository(db)
     skip = (page - 1) * page_size
     
     conversations, total = await repo.list_conversations(
-        user_id=user_id,
+        user_id=user.user_id,
         skip=skip,
         limit=page_size
     )
@@ -476,6 +644,7 @@ async def list_conversations(
 async def get_conversation(
     conversation_id: UUID,
     db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.READ_DATA)),
 ):
     """Get conversation with full message history."""
     repo = ConversationRepository(db)
@@ -486,6 +655,9 @@ async def get_conversation(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Conversation not found"
         )
+
+    if conversation.user_id != user.user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     
     messages = await repo.get_messages(conversation_id, limit=100)
     
@@ -517,10 +689,15 @@ async def get_conversation(
 async def delete_conversation(
     conversation_id: UUID,
     db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.WRITE_DATA)),
 ):
     """Delete a conversation."""
     repo = ConversationRepository(db)
-    
+
+    conversation = await repo.get_conversation(conversation_id)
+    if not conversation or conversation.user_id != user.user_id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+
     success = await repo.delete_conversation(conversation_id)
     if not success:
         raise HTTPException(

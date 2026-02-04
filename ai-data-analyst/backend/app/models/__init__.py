@@ -10,10 +10,14 @@ from app.models.database import (
     MLModel,
     Conversation,
     Message,
+    Artifact,
+    DataAdequacySession,
     DatasetStatus,
     AnalysisType,
     AnalysisStatus,
     ModelType,
+    ArtifactType,
+    AdequacySessionStatus,
 )
 
 __all__ = [
@@ -25,8 +29,12 @@ __all__ = [
     "MLModel",
     "Conversation",
     "Message",
+    "Artifact",
+    "DataAdequacySession",
     "DatasetStatus",
     "AnalysisType",
     "AnalysisStatus",
     "ModelType",
+    "ArtifactType",
+    "AdequacySessionStatus",
 ]

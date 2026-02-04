@@ -482,6 +482,11 @@ class ConnectorFactory:
         return ConnectorFactory.create(config)
 
 
+def get_connector(config: ConnectionConfig) -> BaseConnector:
+    """Convenience wrapper for creating a connector from config."""
+    return ConnectorFactory.create(config)
+
+
 # ============================================================================
 # Data Connector Service
 # ============================================================================

@@ -234,6 +234,7 @@ class DocumentParser:
                 "metadata": {"encoding_used": encoding},
                 "language": self._detect_language(text),
                 "readability_score": textstat.flesch_reading_ease(text) if text else 0
+            }
         
         except Exception as e:
             return {"success": False, "error": f"Text parsing failed: {str(e)}"}

@@ -3,14 +3,14 @@
 
 from __future__ import annotations
 
-import io
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas import (
@@ -33,11 +33,26 @@ from app.core.exceptions import (
 )
 from app.core.logging import get_logger, LogContext
 from app.services.database import get_db_session
-from app.services.data_ingestion import get_ingestion_service, FileFormat
+from app.api.routes.auth import require_permission
+from app.services.auth_service import AuthUser, Permission
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+def _schema_dataset_status(value: Any) -> DatasetStatus:
+    if isinstance(value, DatasetStatus):
+        return value
+    v = getattr(value, "value", value)
+    return DatasetStatus(str(v))
+
+
+def _sanitize_filename(name: str) -> str:
+    # Drop any path components and keep a conservative character set to avoid
+    # weird filesystem edge cases (Windows reserved chars, path traversal, etc).
+    base = Path(name).name
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._")
+    return base or "upload"
 
 
 # ============================================================================
@@ -62,7 +77,7 @@ class DatasetRepository:
         tags: list[str] = None,
     ):
         """Create new dataset record."""
-        from app.models import Dataset
+        from app.models import Dataset, DatasetStatus as ModelDatasetStatus
         
         dataset = Dataset(
             name=name,
@@ -73,7 +88,7 @@ class DatasetRepository:
             file_format=file_format,
             owner_id=owner_id,
             tags=tags or [],
-            status=DatasetStatus.PENDING
+            status=ModelDatasetStatus.PENDING
         )
         
         self.session.add(dataset)
@@ -103,7 +118,7 @@ class DatasetRepository:
         search: Optional[str] = None,
     ):
         """Get all datasets for owner with filtering."""
-        from app.models import Dataset
+        from app.models import Dataset, DatasetStatus as ModelDatasetStatus
         from sqlalchemy import select, func, or_
         
         query = select(Dataset).where(
@@ -112,7 +127,7 @@ class DatasetRepository:
         )
         
         if status_filter:
-            query = query.where(Dataset.status == status_filter)
+            query = query.where(Dataset.status == ModelDatasetStatus(status_filter.value))
         
         if search:
             query = query.where(
@@ -174,12 +189,13 @@ class DatasetRepository:
     description="Upload a data file (CSV, Excel, JSON, Parquet) for analysis"
 )
 async def upload_dataset(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Data file to upload"),
     name: str = Form(..., min_length=1, max_length=255, description="Dataset name"),
     description: Optional[str] = Form(None, max_length=2000, description="Dataset description"),
     tags: Optional[str] = Form(None, description="Comma-separated tags"),
     db: AsyncSession = Depends(get_db_session),
-    # user_id: UUID = Depends(get_current_user_id),  # TODO: Add auth
+    user: AuthUser = Depends(require_permission(Permission.WRITE_DATA)),
 ):
     """
     Upload and process a dataset file.
@@ -193,17 +209,17 @@ async def upload_dataset(
     """
     context = LogContext(component="DatasetAPI", operation="upload")
     
-    # For demo, using a fixed user ID (replace with auth)
-    from uuid import uuid4
-    user_id = uuid4()
+    user_id = user.user_id
     
     # Validate file extension
-    filename = file.filename or "unknown"
-    extension = Path(filename).suffix.lower().lstrip('.')
+    raw_filename = file.filename or "unknown"
+    original_filename = Path(raw_filename).name or "unknown"
+    safe_original_filename = _sanitize_filename(original_filename)
+    extension = Path(original_filename).suffix.lower().lstrip(".")
     
     if extension not in settings.allowed_extensions:
         raise FileFormatException(
-            filename=filename,
+            filename=original_filename,
             actual_format=extension,
             supported_formats=settings.allowed_extensions
         )
@@ -216,7 +232,7 @@ async def upload_dataset(
     max_size = settings.max_upload_size_mb * 1024 * 1024
     if file_size > max_size:
         raise FileUploadException(
-            filename=filename,
+            filename=original_filename,
             reason=f"File size ({file_size / 1024 / 1024:.1f}MB) exceeds maximum ({settings.max_upload_size_mb}MB)"
         )
     
@@ -227,7 +243,7 @@ async def upload_dataset(
         
         # Generate unique file path
         timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        safe_filename = f"{timestamp}_{user_id}_{filename}"
+        safe_filename = f"{timestamp}_{user_id}_{safe_original_filename}"
         file_path = upload_dir / safe_filename
         
         # Save file
@@ -235,7 +251,7 @@ async def upload_dataset(
             shutil.copyfileobj(file.file, buffer)
         
         logger.info(
-            f"File uploaded: {filename}",
+            f"File uploaded: {original_filename}",
             context=context,
             file_size=file_size,
             format=extension
@@ -248,22 +264,26 @@ async def upload_dataset(
         dataset = await repo.create(
             name=name,
             description=description,
-            original_filename=filename,
+            original_filename=original_filename,
             file_path=str(file_path),
             file_size=file_size,
             file_format=extension,
             owner_id=user_id,
             tags=tag_list
         )
-        
-        # TODO: Queue background processing task
-        # celery_app.send_task("process_dataset", args=[str(dataset.id)])
+
+        # Kick off processing asynchronously so upload can return quickly.
+        # For distributed processing (multi-instance), wire this to Celery/Redis.
+        from app.services.dataset_processing import DatasetProcessingService
+
+        if background_tasks is not None:
+            background_tasks.add_task(DatasetProcessingService().process_dataset, dataset.id)
         
         response = DatasetUploadResponse(
             dataset_id=dataset.id,
-            filename=filename,
+            filename=original_filename,
             file_size_bytes=file_size,
-            status=DatasetStatus.PENDING,
+            status=_schema_dataset_status(dataset.status),
             message="Dataset uploaded successfully. Processing will begin shortly."
         )
         
@@ -274,7 +294,7 @@ async def upload_dataset(
         
     except Exception as e:
         logger.error(f"Upload failed: {e}", context=context, exc_info=True)
-        raise FileUploadException(filename=filename, reason=str(e))
+        raise FileUploadException(filename=original_filename, reason=str(e))
 
 
 @router.get(
@@ -289,11 +309,10 @@ async def list_datasets(
     status: Optional[DatasetStatus] = Query(None, description="Filter by status"),
     search: Optional[str] = Query(None, max_length=100, description="Search in name/description"),
     db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.READ_DATA)),
 ):
     """List all datasets with pagination and filtering."""
-    # For demo, using a fixed user ID (replace with auth)
-    from uuid import uuid4
-    user_id = uuid4()
+    user_id = user.user_id
     
     repo = DatasetRepository(db)
     skip = (page - 1) * page_size
@@ -316,7 +335,7 @@ async def list_datasets(
             original_filename=d.original_filename,
             file_size_bytes=d.file_size_bytes,
             file_format=d.file_format,
-            status=d.status,
+            status=_schema_dataset_status(d.status),
             error_message=d.error_message,
             row_count=d.row_count,
             column_count=d.column_count,
@@ -351,12 +370,16 @@ async def list_datasets(
 async def get_dataset(
     dataset_id: UUID,
     db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.READ_DATA)),
 ):
     """Get dataset by ID with full details."""
     repo = DatasetRepository(db)
     dataset = await repo.get_by_id(dataset_id)
     
     if not dataset:
+        raise DataNotFoundException("Dataset", dataset_id)
+
+    if dataset.owner_id != user.user_id:
         raise DataNotFoundException("Dataset", dataset_id)
     
     # Convert columns to ColumnInfo
@@ -382,7 +405,7 @@ async def get_dataset(
         original_filename=dataset.original_filename,
         file_size_bytes=dataset.file_size_bytes,
         file_format=dataset.file_format,
-        status=dataset.status,
+        status=_schema_dataset_status(dataset.status),
         error_message=dataset.error_message,
         row_count=dataset.row_count,
         column_count=dataset.column_count,
@@ -409,9 +432,13 @@ async def update_dataset(
     dataset_id: UUID,
     update_data: DatasetUpdate,
     db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.WRITE_DATA)),
 ):
     """Update dataset metadata."""
     repo = DatasetRepository(db)
+    existing = await repo.get_by_id(dataset_id)
+    if not existing or existing.owner_id != user.user_id:
+        raise DataNotFoundException("Dataset", dataset_id)
     
     update_dict = update_data.model_dump(exclude_unset=True)
     dataset = await repo.update(dataset_id, update_dict)
@@ -423,7 +450,7 @@ async def update_dataset(
         original_filename=dataset.original_filename,
         file_size_bytes=dataset.file_size_bytes,
         file_format=dataset.file_format,
-        status=dataset.status,
+        status=_schema_dataset_status(dataset.status),
         error_message=dataset.error_message,
         row_count=dataset.row_count,
         column_count=dataset.column_count,
@@ -448,9 +475,13 @@ async def update_dataset(
 async def delete_dataset(
     dataset_id: UUID,
     db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.DELETE_DATA)),
 ):
     """Delete dataset."""
     repo = DatasetRepository(db)
+    existing = await repo.get_by_id(dataset_id)
+    if not existing or existing.owner_id != user.user_id:
+        raise DataNotFoundException("Dataset", dataset_id)
     await repo.delete(dataset_id)
     
     return APIResponse.success(
@@ -467,7 +498,9 @@ async def delete_dataset(
 )
 async def process_dataset(
     dataset_id: UUID,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS)),
 ):
     """Process dataset file to extract schema and profile."""
     context = LogContext(component="DatasetAPI", operation="process")
@@ -477,8 +510,13 @@ async def process_dataset(
     
     if not dataset:
         raise DataNotFoundException("Dataset", dataset_id)
+
+    if dataset.owner_id != user.user_id:
+        raise DataNotFoundException("Dataset", dataset_id)
     
-    if dataset.status not in [DatasetStatus.PENDING, DatasetStatus.ERROR]:
+    from app.models import DatasetStatus as ModelDatasetStatus
+
+    if dataset.status == ModelDatasetStatus.READY:
         return APIResponse.success(
             data=DatasetResponse(
                 id=dataset.id,
@@ -487,90 +525,45 @@ async def process_dataset(
                 original_filename=dataset.original_filename,
                 file_size_bytes=dataset.file_size_bytes,
                 file_format=dataset.file_format,
-                status=dataset.status,
+                status=_schema_dataset_status(dataset.status),
                 error_message=dataset.error_message,
                 row_count=dataset.row_count,
                 column_count=dataset.column_count,
                 quality_score=dataset.quality_score,
                 tags=dataset.tags,
                 created_at=dataset.created_at,
-                updated_at=dataset.updated_at
+                updated_at=dataset.updated_at,
             ),
-            message="Dataset already processed"
+            message="Dataset already processed",
         )
-    
-    try:
-        # Update status
-        await repo.update(dataset_id, {"status": DatasetStatus.PROCESSING})
-        
-        # Process file
-        ingestion_service = get_ingestion_service()
-        
-        with open(dataset.file_path, "rb") as f:
-            df, profile = ingestion_service.ingest_file(
-                f,
-                dataset.original_filename
-            )
-        
-        # Update dataset with profile
-        from app.models import DatasetColumn
-        
-        update_data = {
-            "status": DatasetStatus.READY,
-            "row_count": profile.row_count,
-            "column_count": profile.column_count,
-            "schema_info": {"columns": [c.to_dict() for c in profile.columns]},
-            "quality_score": profile.overall_quality_score,
-            "quality_report": {
-                "completeness": profile.completeness_score,
-                "uniqueness": profile.uniqueness_score,
-                "consistency": profile.consistency_score,
-                "warnings": profile.warnings
-            },
-            "profile_report": profile.to_dict()
-        }
-        
-        dataset = await repo.update(dataset_id, update_data)
-        
-        logger.info(
-            f"Dataset processed: {dataset.name}",
-            context=context,
-            rows=profile.row_count,
-            columns=profile.column_count,
-            quality=profile.overall_quality_score
-        )
-        
-        response = DatasetResponse(
-            id=dataset.id,
-            name=dataset.name,
-            description=dataset.description,
-            original_filename=dataset.original_filename,
-            file_size_bytes=dataset.file_size_bytes,
-            file_format=dataset.file_format,
-            status=dataset.status,
-            error_message=dataset.error_message,
-            row_count=dataset.row_count,
-            column_count=dataset.column_count,
-            quality_score=dataset.quality_score,
-            tags=dataset.tags,
-            created_at=dataset.created_at,
-            updated_at=dataset.updated_at
-        )
-        
-        return APIResponse.success(
-            data=response,
-            message="Dataset processed successfully"
-        )
-        
-    except Exception as e:
-        logger.error(f"Processing failed: {e}", context=context, exc_info=True)
-        
-        await repo.update(dataset_id, {
-            "status": DatasetStatus.ERROR,
-            "error_message": str(e)
-        })
-        
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process dataset: {str(e)}"
-        )
+
+    # Mark as processing and enqueue background work.
+    dataset = await repo.update(dataset_id, {"status": ModelDatasetStatus.PROCESSING, "error_message": None})
+
+    from app.services.dataset_processing import DatasetProcessingService
+
+    background_tasks.add_task(DatasetProcessingService().process_dataset, dataset.id)
+
+    logger.info("Dataset processing enqueued", context=context, dataset_id=str(dataset.id))
+
+    response = DatasetResponse(
+        id=dataset.id,
+        name=dataset.name,
+        description=dataset.description,
+        original_filename=dataset.original_filename,
+        file_size_bytes=dataset.file_size_bytes,
+        file_format=dataset.file_format,
+        status=_schema_dataset_status(dataset.status),
+        error_message=dataset.error_message,
+        row_count=dataset.row_count,
+        column_count=dataset.column_count,
+        quality_score=dataset.quality_score,
+        tags=dataset.tags,
+        created_at=dataset.created_at,
+        updated_at=dataset.updated_at,
+    )
+
+    return APIResponse.success(
+        data=response,
+        message="Dataset processing started",
+    )

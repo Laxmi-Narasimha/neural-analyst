@@ -1,68 +1,57 @@
-# “Industry-Grade” Audit (current state)
+# Industry-Grade Audit (current state)
 
-This audit is based on what exists on disk in `/Users/laxmi/Downloads/data_analyst` on **2026-02-03**.
+Date: 2026-02-04
 
-## Scorecard (0–5)
+This is an honest engineering audit of what exists in this repo today, with a focus on reliability, scale, and "enterprise-grade" expectations.
 
-- **Repo hygiene:** 1/5
-  - Large generated/vendor artifacts are present in-tree (notably `ai-data-analyst/frontend/node_modules/`, `ai-data-analyst/frontend/.next/`, `ai-data-validator/.venv/`, coverage artifacts).
-  - Nested git repo exists at `ai-data-analyst/frontend/.git/` (not suitable for a monorepo).
-- **Runtime reproducibility:** 2/5
-  - Some pinning exists (Python requirements, `package-lock.json`), but toolchain versions were not enforced at the repo root before.
-  - Frontend requires **Node >= 20.9.0** (from `ai-data-analyst/frontend/node_modules/next/package.json` engines) while the plan initially assumed 18+.
-- **Security:** 2/5
-  - `ai-data-analyst` has RBAC concepts and JWT scaffolding, but the implementation had correctness issues (refresh flow, secret handling, per-request service instantiation).
-  - CORS and upload limits exist, but there are still TODOs and demo-grade defaults.
-- **Correctness:** 2/5
-  - API routing and prefixes were inconsistent (double-prefix bugs were possible; frontend default API base didn’t match backend).
-  - DB health check used a SQLAlchemy 2.0-incompatible execute pattern.
-  - Startup previously failed hard if Postgres wasn’t running/configured.
-- **Testing:** 3/5
-  - `ai-data-analyst/backend/tests/` is extensive (mostly engine-level tests), but runtime dependency weight and environment requirements make it hard to run on a clean machine.
-  - No CI config present in this workspace.
-- **Operability:** 3/5
-  - Structured logging + request IDs exist; `/health` + `/ready` endpoints exist.
-  - Redis/Celery are referenced but not wired (TODOs), and there is no metrics/tracing integration.
+## What is already strong
 
----
+- Backend has structured config, error types, logging context, and async SQLAlchemy foundations.
+- A safe compute layer exists (operators + executor) to ground analysis on real uploaded datasets.
+- Dataset ownership checks are present (prevents cross-user access).
+- Backend unit test suite is large and currently passes locally.
+- Frontend builds cleanly and is now wired to the real backend for auth, datasets, chat, and Data Speaks.
 
-## P0 blockers (must fix to run reliably)
+## Most important gaps (ranked)
 
-1. **Toolchain mismatch**
-   - Analyst backend requires Python 3.11+ but your machine currently has `python3` 3.9.6.
-   - Analyst frontend requires Node >= 20.9.0; your machine currently has no Node installed.
-2. **Frontend ↔ backend base URL mismatch**
-   - Frontend client defaulted to `http://localhost:8000/api` but backend routes are under `/api/v1/*`.
-3. **API routing inconsistencies**
-   - Some route modules had their own `prefix=...` while the route aggregator also applied prefixes (risking double-prefix endpoints).
-4. **DB health check / startup robustness**
-   - Health check used a non-`text()` query string; and app startup previously failed hard when DB was unavailable, preventing `/health` from coming up.
-5. **Auth correctness**
-   - Token refresh path was logically broken; and the dependency provider returned a new auth service per request (losing in-memory users/sessions).
+### P0 (blocks real production scale)
 
----
+1) Background jobs are not truly distributed yet
+- Upload/processing currently uses in-process background tasks for dev convenience.
+- For real scale (multiple API instances), you need an out-of-process worker queue (Celery/RQ/Temporal) + Redis/SQS/RabbitMQ.
 
-## P1 hardening (should fix before real users)
+2) Migrations are not wired as the source of truth
+- The backend currently relies on table auto-create in dev.
+- Production must use Alembic migrations for controlled schema evolution and safe deploys.
 
-- **Persistence & migrations**
-  - Auth and API keys should be backed by the database (not in-memory).
-  - Add Alembic migrations (README references migrations, but no `alembic.ini`/migration tree exists).
-- **Security defaults**
-  - Require a strong `SECRET_KEY` in non-dev environments; tighten CORS; add CSRF strategy if cookies are used.
-- **Upload and parsing hardening**
-  - Add explicit content-type sniffing, antivirus hooks (if required), and sandboxing for unsafe document parsing.
-- **Dependency footprint**
-  - Consider splitting `ai-data-analyst/backend/requirements.txt` into a minimal “core” set + optional heavy ML extras.
-- **CI**
-  - Add a simple CI workflow (lint + unit tests) and a release checklist.
+3) Artifact storage is local-disk
+- Artifacts and uploads on local disk break with multiple instances and ephemeral containers.
+- Production needs S3-compatible object storage and signed URLs for downloads.
 
----
+4) CI/CD is missing
+- No GitHub Actions workflow (lint + tests + build).
+- No environment promotion (dev/stage/prod) or release checklist automation.
 
-## P2 improvements (scale/perf/maintainability)
+### P1 (should do before real customers)
 
-- Replace in-memory rate limiting with Redis-backed rate limiting.
-- Add background job execution (Celery/Redis) for long analyses.
-- Add tracing (OpenTelemetry) and metrics (Prometheus) hooks.
-- Formalize API contracts (OpenAPI linting, typed client generation).
-- Add end-to-end tests (Playwright) for the Next.js UI.
+- Observability: tracing (OpenTelemetry), metrics (Prometheus), and structured logs shipped to a log backend.
+- Security hardening: stronger auth flows (refresh token rotation if you add refresh), rate limiting backed by Redis, CORS tightening, secrets management, audit logs.
+- Multi-tenant safety: limits on dataset size/rows, timeouts for compute, per-user quotas, and abuse protection.
+- API contracts: generate a typed client (OpenAPI -> TS client) to prevent frontend/backend drift.
+- E2E tests: Playwright smoke tests for "upload -> process -> data speaks -> chat".
+
+### P2 (nice-to-have / competitive moat)
+
+- Semantic layer: column semantics, PII detection, and dataset versioning with lineage.
+- More operator coverage (time series, cohort, funnels, segmentation) with strict determinism.
+- Caching of compute artifacts keyed by dataset version hash.
+- Enterprise RBAC, SSO (SAML/OIDC), org/workspace model, and audit trails.
+
+## What we should build next (recommended sequence)
+
+1) Job system (queue + worker) for dataset processing + heavy compute
+2) Storage abstraction (local -> S3) for uploads and artifacts
+3) Migrations and production deploy story (Postgres + Alembic + migrations on deploy)
+4) CI (backend tests + frontend build) + basic E2E
+5) Observability (request IDs already exist; add metrics/tracing)
 

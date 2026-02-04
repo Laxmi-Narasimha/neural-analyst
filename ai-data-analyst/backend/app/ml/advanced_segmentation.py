@@ -645,7 +645,9 @@ class AdvancedSegmentationEngine:
         df: pd.DataFrame,
         columns: List[str] = None,
         n_clusters: int = None,
-        method: ClusteringMethod = None
+        method: ClusteringMethod = None,
+        auto_k: bool = False,
+        max_k: Optional[int] = None,
     ) -> SegmentationResult:
         """
         Segment data into clusters.
@@ -681,12 +683,28 @@ class AdvancedSegmentationEngine:
         
         # Determine K
         k_scores = {}
-        if n_clusters is None and method not in [ClusteringMethod.DBSCAN, 
-                                                   ClusteringMethod.OPTICS,
-                                                   ClusteringMethod.MEAN_SHIFT]:
+        needs_k = method not in [ClusteringMethod.DBSCAN, ClusteringMethod.OPTICS, ClusteringMethod.MEAN_SHIFT]
+
+        if max_k is not None:
+            try:
+                max_k_int = int(max_k)
+            except Exception:
+                max_k_int = None
+        else:
+            max_k_int = None
+
+        if (auto_k or n_clusters is None) and needs_k:
             if self.verbose:
                 logger.info("Finding optimal K...")
-            n_clusters, k_scores = self.k_selector.find_optimal_k(X)
+
+            original_k_max = self.config.k_max
+            if max_k_int is not None:
+                self.config.k_max = max_k_int
+            try:
+                n_clusters, k_scores = self.k_selector.find_optimal_k(X)
+            finally:
+                self.config.k_max = original_k_max
+
             if self.verbose:
                 logger.info(f"Optimal K: {n_clusters}")
         elif n_clusters is None:

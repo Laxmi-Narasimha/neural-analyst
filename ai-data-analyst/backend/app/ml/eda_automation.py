@@ -149,6 +149,10 @@ class EDAResult:
             "recommendations": self.recommendations[:10]
         }
 
+    @property
+    def insights(self) -> List[str]:
+        return self.key_insights
+
 
 # ============================================================================
 # EDA Automation Engine

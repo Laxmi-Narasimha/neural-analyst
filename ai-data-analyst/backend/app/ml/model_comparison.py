@@ -154,14 +154,31 @@ class ModelComparisonEngine:
     
     def compare(
         self,
-        X: pd.DataFrame,
-        y: pd.Series,
-        models: Dict[str, Any],
+        *args: Any,
         task_type: ModelType = None,
-        primary_metric: ComparisonCriterion = None
+        primary_metric: ComparisonCriterion = None,
     ) -> ModelComparisonResult:
-        """Compare multiple models."""
+        """
+        Compare multiple models.
+
+        Supports both call styles:
+        - compare(models, X, y)  (used by repo tests)
+        - compare(X, y, models)  (legacy/internal)
+        """
         start_time = datetime.now()
+
+        if len(args) != 3:
+            raise ValueError("compare expects 3 positional arguments: (models, X, y) or (X, y, models)")
+
+        a0, a1, a2 = args
+        if isinstance(a0, dict):
+            models: Dict[str, Any] = a0
+            X: pd.DataFrame = a1
+            y: pd.Series = a2
+        else:
+            X = a0
+            y = a1
+            models = a2
         
         # Auto-detect task type
         if task_type is None:
@@ -407,7 +424,7 @@ def quick_compare(
 ) -> Dict[str, Any]:
     """Quick model comparison."""
     engine = ModelComparisonEngine(verbose=False)
-    result = engine.compare(X, y, models)
+    result = engine.compare(models, X, y)
     return result.to_dict()
 
 
