@@ -1,0 +1,27 @@
+services:
+  analyst-backend:
+    environment:
+      JOB_EXECUTOR: celery
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+
+  analyst-worker:
+    build:
+      context: ./ai-data-analyst/backend
+    command: ["celery", "-A", "app.workers.celery_app.celery_app", "worker", "-l", "info"]
+    environment:
+      ENVIRONMENT: development
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/ai_data_analyst
+      DB_AUTO_CREATE_TABLES: "true"
+      MAX_UPLOAD_SIZE_MB: "1024"
+      JOB_EXECUTOR: celery
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - analyst_uploads:/app/uploads
+      - analyst_artifacts:/app/artifacts
+

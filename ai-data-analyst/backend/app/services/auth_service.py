@@ -54,6 +54,7 @@ ROLE_PERMISSIONS = {
     UserRole.ANALYST: [
         Permission.READ_DATA,
         Permission.WRITE_DATA,
+        Permission.DELETE_DATA,
         Permission.RUN_ANALYSIS,
         Permission.MANAGE_MODELS,
     ],

@@ -309,34 +309,67 @@
     font-size: 0.8125rem;
 }
 
-/* Security Visual */
-.securityPreview {
-    position: relative;
-}
-
-.securityRow {
+/* ASCII Security Visual */
+.asciiSecurity {
+    height: 100%;
     display: flex;
-    justify-content: space-between;
-    padding: 16px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    position: relative;
+    overflow: hidden;
 }
 
-.securityLabel {
-    font-size: 0.9375rem;
-    color: rgba(255, 255, 255, 0.5);
+.asciiGrid {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.78rem;
+    line-height: 1.55;
+    letter-spacing: 0.04em;
+    margin: 0;
+    color: rgba(80, 250, 123, 0.3);
+    text-shadow: 0 0 8px rgba(80, 250, 123, 0.15);
+    user-select: none;
 }
 
-.securityValue {
-    font-size: 0.9375rem;
-    color: rgba(255, 255, 255, 0.9);
-    font-family: 'JetBrains Mono', monospace;
+.asciiLine {
+    white-space: pre;
+    transition: color 0.15s ease;
 }
 
-.securityShield {
+.asciiScanLine {
+    color: rgba(80, 250, 123, 1) !important;
+    text-shadow: 0 0 20px rgba(80, 250, 123, 0.6),
+        0 0 40px rgba(80, 250, 123, 0.2);
+    background: linear-gradient(90deg, transparent, rgba(80, 250, 123, 0.04), transparent);
+}
+
+.asciiOverlay {
     position: absolute;
-    bottom: 20px;
-    right: 20px;
-    color: rgba(255, 255, 255, 0.1);
+    bottom: 16px;
+    right: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.asciiStatus {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6875rem;
+    color: rgba(80, 250, 123, 0.7);
+    letter-spacing: 0.1em;
+    animation: statusPulse 2s ease-in-out infinite;
+}
+
+@keyframes statusPulse {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
 }
 
 /* Responsive */

@@ -131,15 +131,37 @@ class DatabaseManager:
         finally:
             await session.close()
     
-    async def health_check(self) -> bool:
-        """Check database connectivity."""
+    async def health_check_detail(self) -> tuple[bool, str | None]:
+        """Check database connectivity and return a short error detail (redacted) on failure."""
+
+        def _redact(value: str) -> str:
+            # Best-effort credential redaction; safe for logs and readiness endpoints.
+            try:
+                if "://" not in value:
+                    return value
+                scheme, rest = value.split("://", 1)
+                if "@" not in rest or ":" not in rest.split("@", 1)[0]:
+                    return value
+                creds, tail = rest.split("@", 1)
+                user = creds.split(":", 1)[0]
+                return f"{scheme}://{user}:***@{tail}"
+            except Exception:
+                return value
+
         try:
             async with self.session() as session:
                 await session.execute(text("SELECT 1"))
-                return True
+                return True, None
         except Exception as e:
-            logger.error(f"Database health check failed: {e}")
-            return False
+            detail = f"{type(e).__name__}: {str(e)}"
+            detail = _redact(detail)
+            logger.error(f"Database health check failed: {detail}")
+            return False, detail
+
+    async def health_check(self) -> bool:
+        """Check database connectivity."""
+        ok, _detail = await self.health_check_detail()
+        return ok
 
 
 # Global instance

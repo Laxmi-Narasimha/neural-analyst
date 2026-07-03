@@ -783,62 +783,67 @@
     text-transform: uppercase;
 }
 
-/* Security Dashboard */
-.securityDashboard {
-    display: flex;
-    gap: 24px;
+/* ASCII Security Visual */
+.asciiSecurity {
     height: 100%;
-}
-
-.securityShield {
     display: flex;
     flex-direction: column;
-    align-items: center;
     justify-content: center;
-    gap: 12px;
-    padding: 24px;
-    background: rgba(16, 185, 129, 0.05);
-    border-radius: 16px;
-}
-
-.securityShield span {
-    font-size: 0.875rem;
-    color: #10b981;
-    font-weight: 500;
-}
-
-.securityStats {
-    flex: 1;
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-}
-
-.securityStat {
-    display: flex;
-    flex-direction: column;
     align-items: center;
-    gap: 6px;
-    padding: 16px;
-    background: rgba(255, 255, 255, 0.03);
-    border-radius: 12px;
+    position: relative;
+    overflow: hidden;
 }
 
-.statIcon {
-    font-size: 1.25rem;
+.asciiGrid {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 0.72rem;
+    line-height: 1.5;
+    letter-spacing: 0.03em;
+    margin: 0;
+    color: rgba(80, 250, 123, 0.3);
+    text-shadow: 0 0 8px rgba(80, 250, 123, 0.15);
+    user-select: none;
 }
 
-.statLabel {
-    font-size: 0.6875rem;
-    color: rgba(255, 255, 255, 0.4);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+.asciiLine {
+    white-space: pre;
+    transition: color 0.15s ease;
 }
 
-.statValue {
-    font-size: 0.875rem;
-    color: #fff;
+.asciiScanLine {
+    color: rgba(80, 250, 123, 1) !important;
+    text-shadow: 0 0 20px rgba(80, 250, 123, 0.6),
+        0 0 40px rgba(80, 250, 123, 0.2);
+    background: linear-gradient(90deg, transparent, rgba(80, 250, 123, 0.04), transparent);
+}
+
+.asciiOverlay {
+    position: absolute;
+    bottom: 12px;
+    right: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.asciiStatus {
     font-family: 'JetBrains Mono', monospace;
+    font-size: 0.6875rem;
+    color: rgba(80, 250, 123, 0.7);
+    letter-spacing: 0.1em;
+    animation: asciiPulse 2s ease-in-out infinite;
+}
+
+@keyframes asciiPulse {
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.5;
+    }
 }
 
 /* Responsive */

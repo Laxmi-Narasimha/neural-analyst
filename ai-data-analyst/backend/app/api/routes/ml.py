@@ -8,13 +8,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.schemas import APIResponse
 from app.api.routes.auth import get_current_user, require_permission
+from app.services.database import get_db_session
 from app.services.auth_service import AuthUser, Permission
-from app.ml.ml_engine import get_ml_engine, MLTask
-from app.ml.automl import get_automl_engine
-from app.ml.explainability import get_explainability_engine
-from app.ml.model_registry import get_model_registry, ModelStage
+
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -75,6 +75,41 @@ class ModelListResponse(BaseModel):
     """Model list response."""
     models: list[dict[str, Any]]
     total: int
+
+
+class LeakageWarningResponse(BaseModel):
+    column: str
+    warning_type: str
+    detail: str
+    severity: str
+
+
+class TargetCandidateResponse(BaseModel):
+    column: str
+    inferred_task: str
+    score: float
+    non_null_rate: float
+    unique_ratio: float
+    reasons: list[str] = Field(default_factory=list)
+    leakage_warnings: list[LeakageWarningResponse] = Field(default_factory=list)
+
+
+class TaskInferenceRequest(BaseModel):
+    dataset_id: UUID
+    preferred_target: Optional[str] = None
+    sample_rows: int = Field(default=100_000, ge=1_000, le=500_000)
+
+
+class TaskInferenceResponse(BaseModel):
+    dataset_id: UUID
+    dataset_version: str
+    sample_rows: int
+    split_strategy: str
+    split_time_column: Optional[str] = None
+    selected_target: Optional[str] = None
+    selected_task: Optional[str] = None
+    candidates: list[TargetCandidateResponse] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 # ============================================================================
@@ -155,7 +190,8 @@ async def predict(
     """Make predictions using a trained model."""
     try:
         import pandas as pd
-        
+        from app.ml.model_registry import get_model_registry
+
         # Load model from registry
         registry = get_model_registry()
         
@@ -221,6 +257,8 @@ async def explain_model(
     """Get model explanations (SHAP values)."""
     try:
         import pandas as pd
+        from app.ml.explainability import get_explainability_engine
+        from app.ml.model_registry import get_model_registry
         
         # Load model
         registry = get_model_registry()
@@ -259,6 +297,8 @@ async def list_models(
     user: AuthUser = Depends(get_current_user)
 ):
     """List all registered models."""
+    from app.ml.model_registry import get_model_registry
+
     registry = get_model_registry()
     models = registry.list_models()
     
@@ -274,6 +314,8 @@ async def get_model(
     user: AuthUser = Depends(get_current_user)
 ):
     """Get model details."""
+    from app.ml.model_registry import get_model_registry
+
     registry = get_model_registry()
     versions = registry.get_model_versions(model_name)
     
@@ -298,6 +340,8 @@ async def promote_model(
 ):
     """Promote model version to a stage."""
     try:
+        from app.ml.model_registry import ModelStage, get_model_registry
+
         registry = get_model_registry()
         
         model_stage = ModelStage(stage)
@@ -325,6 +369,8 @@ async def compare_model_versions(
     user: AuthUser = Depends(get_current_user)
 ):
     """Compare two model versions."""
+    from app.ml.model_registry import get_model_registry
+
     registry = get_model_registry()
     
     try:
@@ -350,3 +396,62 @@ async def get_job_status(
         "progress": 50,
         "message": "Training in progress..."
     }
+
+
+@router.post(
+    "/task-inference",
+    response_model=APIResponse[TaskInferenceResponse],
+    dependencies=[Depends(require_permission(Permission.READ_DATA))],
+)
+async def infer_task_and_target(
+    request: TaskInferenceRequest,
+    user: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """
+    Infer supervised task/target candidates and return leakage warnings.
+
+    This endpoint is deterministic and dataset-grounded, intended as the first
+    step in model workflow clarification.
+    """
+    from app.services.ml_task_inference import MLTaskInferenceService
+    service = MLTaskInferenceService(db)
+    result = await service.infer(
+        dataset_id=request.dataset_id,
+        owner_id=user.user_id,
+        preferred_target=request.preferred_target,
+        sample_rows=request.sample_rows,
+    )
+
+    candidates = [
+        TargetCandidateResponse(
+            column=c.column,
+            inferred_task=c.inferred_task,
+            score=c.score,
+            non_null_rate=c.non_null_rate,
+            unique_ratio=c.unique_ratio,
+            reasons=list(c.reasons),
+            leakage_warnings=[
+                LeakageWarningResponse(
+                    column=w.column,
+                    warning_type=w.warning_type,
+                    detail=w.detail,
+                    severity=w.severity,
+                )
+                for w in c.leakage_warnings
+            ],
+        )
+        for c in result.candidates
+    ]
+    payload = TaskInferenceResponse(
+        dataset_id=result.dataset_id,
+        dataset_version=result.dataset_version,
+        sample_rows=result.sample_rows,
+        split_strategy=result.split_strategy,
+        split_time_column=result.split_time_column,
+        selected_target=result.selected_target,
+        selected_task=result.selected_task,
+        candidates=candidates,
+        warnings=result.warnings,
+    )
+    return APIResponse.success(data=payload)

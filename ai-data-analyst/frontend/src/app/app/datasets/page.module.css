@@ -151,6 +151,8 @@
     font-weight: 600;
     color: #1a1a1a;
     margin-bottom: 4px;
+    text-decoration: none;
+    display: inline-block;
 }
 
 .datasetMeta {

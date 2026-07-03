@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
     IconDashboard, IconDatabase, IconChart, IconSettings,
-    IconPlus, IconSearch, IconUser, IconArrowRight, IconServer, IconShield, IconSparkles
+    IconPlus, IconSearch, IconUser, IconArrowRight, IconServer, IconShield, IconSparkles, IconTime, IconBook
 } from '@/components/icons';
 import { getAccessToken } from '@/lib/auth';
 import styles from './layout.module.css';
@@ -16,6 +16,8 @@ const navItems = [
     { href: '/app/connections', label: 'Connections', Icon: IconServer },
     { href: '/app/analysis', label: 'Analysis', Icon: IconChart },
     { href: '/app/data-speaks', label: 'Data Speaks', Icon: IconSparkles },
+    { href: '/app/jobs', label: 'Jobs', Icon: IconTime },
+    { href: '/app/reports', label: 'Reports', Icon: IconBook },
     { href: '/app/quality', label: 'Data Quality', Icon: IconShield },
     { href: '/app/settings', label: 'Settings', Icon: IconSettings },
 ];

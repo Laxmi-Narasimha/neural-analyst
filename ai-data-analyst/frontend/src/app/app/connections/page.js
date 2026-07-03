@@ -2,7 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { IconDatabase, IconPlus, IconTrash, IconCheck, IconX, IconLoader, IconServer } from '@/components/icons';
+import Link from 'next/link';
+import { IconDatabase, IconDownload, IconPlus, IconTrash, IconCheck, IconX, IconLoader, IconServer } from '@/components/icons';
 import api from '@/lib/api';
 import styles from './page.module.css';
 
@@ -23,6 +24,12 @@ export default function ConnectionsPage() {
     const [testResult, setTestResult] = useState({});
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState(null);
+    const [importModal, setImportModal] = useState({ open: false, connection: null });
+    const [tablesLoading, setTablesLoading] = useState(false);
+    const [tables, setTables] = useState([]);
+    const [importForm, setImportForm] = useState({ tableName: '', datasetName: '', maxRows: 200000 });
+    const [importing, setImporting] = useState(false);
+    const [importResult, setImportResult] = useState(null);
 
     const [formData, setFormData] = useState({
         name: '',
@@ -42,17 +49,68 @@ export default function ConnectionsPage() {
     const loadConnections = async () => {
         try {
             setLoading(true);
+            setError(null);
             const response = await api.listConnections();
             setConnections(response.items || []);
         } catch (error) {
             console.error('Failed to load connections:', error);
-            // Use mock data
-            setConnections([
-                { id: '1', name: 'Production DB', connector_type: 'postgresql', host: 'db.example.com', database: 'analytics', status: 'active' },
-                { id: '2', name: 'Data Warehouse', connector_type: 'snowflake', host: 'account.snowflakecomputing.com', database: 'warehouse', status: 'active' },
-            ]);
+            setConnections([]);
+            setError(error?.message || 'Failed to load connections');
         } finally {
             setLoading(false);
+        }
+    };
+
+    const openImportModal = async (conn) => {
+        setImportResult(null);
+        setTables([]);
+        setImportForm({
+            tableName: '',
+            datasetName: conn?.name ? `${conn.name} import` : '',
+            maxRows: 200000,
+        });
+        setImportModal({ open: true, connection: conn });
+
+        try {
+            setTablesLoading(true);
+            setError(null);
+            const res = await api.listConnectionTables(conn.id);
+            setTables(res?.tables || []);
+        } catch (e) {
+            setTables([]);
+            setError(e?.message || 'Failed to load tables');
+        } finally {
+            setTablesLoading(false);
+        }
+    };
+
+    const closeImportModal = () => {
+        setImportModal({ open: false, connection: null });
+        setTables([]);
+        setImportResult(null);
+    };
+
+    const runImport = async (e) => {
+        e.preventDefault();
+        const conn = importModal?.connection;
+        if (!conn?.id) return;
+        if (!importForm.tableName || !importForm.datasetName) {
+            setError('Table name and dataset name are required');
+            return;
+        }
+
+        try {
+            setImporting(true);
+            setError(null);
+            const res = await api.importFromConnection(conn.id, importForm.tableName, importForm.datasetName, {
+                max_rows: importForm.maxRows,
+            });
+            setImportResult(res);
+            await loadConnections();
+        } catch (e2) {
+            setError(e2?.message || 'Import failed');
+        } finally {
+            setImporting(false);
         }
     };
 
@@ -318,6 +376,14 @@ export default function ConnectionsPage() {
                                     {testing === conn.id ? <IconLoader size={16} className={styles.spinning} /> : 'Test'}
                                 </button>
                                 <button
+                                    onClick={() => openImportModal(conn)}
+                                    className={styles.importBtn}
+                                    type="button"
+                                >
+                                    <IconDownload size={16} />
+                                    Import
+                                </button>
+                                <button
                                     onClick={() => deleteConnection(conn.id)}
                                     className={styles.deleteBtn}
                                 >
@@ -338,6 +404,109 @@ export default function ConnectionsPage() {
                         <IconPlus size={18} />
                         Add Connection
                     </button>
+                </div>
+            )}
+
+            {/* Import Modal */}
+            {importModal.open && (
+                <div className={styles.modalOverlay} role="dialog" aria-modal="true">
+                    <motion.div
+                        className={styles.modalCard}
+                        initial={{ opacity: 0, y: 12, scale: 0.98 }}
+                        animate={{ opacity: 1, y: 0, scale: 1 }}
+                    >
+                        <div className={styles.modalHeader}>
+                            <div>
+                                <h2 className={styles.modalTitle}>Import Table</h2>
+                                <p className={styles.modalSubtitle}>
+                                    {importModal?.connection?.name} ({importModal?.connection?.connector_type})
+                                </p>
+                            </div>
+                            <button type="button" className={styles.modalClose} onClick={closeImportModal}>
+                                <IconX size={18} />
+                            </button>
+                        </div>
+
+                        {tablesLoading ? (
+                            <div className={styles.modalLoading}>
+                                <IconLoader size={20} className={styles.spinning} />
+                                Loading tables...
+                            </div>
+                        ) : null}
+
+                        <form onSubmit={runImport} className={styles.modalForm}>
+                            <div className={styles.formGroup}>
+                                <label>Table</label>
+                                <select
+                                    value={importForm.tableName}
+                                    onChange={(e) => setImportForm((p) => ({ ...p, tableName: e.target.value }))}
+                                    className={styles.select}
+                                >
+                                    <option value="" disabled>Select a table</option>
+                                    {(tables || []).map((t) => (
+                                        <option key={t} value={t}>
+                                            {t}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            <div className={styles.formRow}>
+                                <div className={styles.formGroup}>
+                                    <label>Dataset name</label>
+                                    <input
+                                        value={importForm.datasetName}
+                                        onChange={(e) => setImportForm((p) => ({ ...p, datasetName: e.target.value }))}
+                                        placeholder="My imported dataset"
+                                    />
+                                </div>
+                                <div className={styles.formGroup}>
+                                    <label>Max rows</label>
+                                    <input
+                                        type="number"
+                                        min={1}
+                                        max={5000000}
+                                        value={importForm.maxRows}
+                                        onChange={(e) =>
+                                            setImportForm((p) => ({ ...p, maxRows: Number(e.target.value || 0) }))
+                                        }
+                                    />
+                                </div>
+                            </div>
+
+                            <div className={styles.modalActions}>
+                                <button type="button" onClick={closeImportModal} className={styles.cancelBtn}>
+                                    Cancel
+                                </button>
+                                <button type="submit" disabled={importing} className={styles.saveBtn}>
+                                    {importing ? <IconLoader size={18} className={styles.spinning} /> : <IconDownload size={18} />}
+                                    {importing ? 'Importing...' : 'Import'}
+                                </button>
+                            </div>
+                        </form>
+
+                        {importResult?.dataset_id ? (
+                            <div className={styles.importResult}>
+                                <div className={styles.importResultTitle}>Import started</div>
+                                <div className={styles.importResultMeta}>
+                                    Dataset: <code>{String(importResult.dataset_id)}</code>
+                                </div>
+                                {importResult?.job_id ? (
+                                    <div className={styles.importResultMeta}>
+                                        Job: <code>{String(importResult.job_id)}</code>
+                                    </div>
+                                ) : null}
+                                <div className={styles.importLinks}>
+                                    <Link href={`/app/datasets/${importResult.dataset_id}`} className={styles.linkBtn}>
+                                        Open dataset
+                                    </Link>
+                                    <Link href="/app/jobs" className={styles.linkBtnSecondary}>
+                                        View jobs
+                                    </Link>
+                                </div>
+                            </div>
+                        ) : null}
+                    </motion.div>
                 </div>
             )}
         </div>

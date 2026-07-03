@@ -323,7 +323,9 @@ export default function DatasetsPage() {
                                 <IconDatabase size={20} />
                             </div>
                             <div className={styles.datasetInfo}>
-                                <h3 className={styles.datasetName}>{dataset.name}</h3>
+                                <Link href={`/app/datasets/${dataset.id}`} className={styles.datasetName}>
+                                    {dataset.name}
+                                </Link>
                                 <p className={styles.datasetMeta}>
                                     {renderDatasetMeta(dataset)}
                                 </p>

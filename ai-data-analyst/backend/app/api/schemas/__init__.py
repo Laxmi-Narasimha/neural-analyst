@@ -24,12 +24,41 @@ from app.api.schemas.base import (
     DatasetResponse,
     DatasetDetailResponse,
     DatasetUploadResponse,
+    DatasetVersionResponse,
+    DatasetTransformStep,
+    DatasetTransformPreviewRequest,
+    DatasetTransformPreviewResponse,
+    DatasetTransformApplyRequest,
+    DatasetTransformApplyResponse,
+    DatasetTransformSuggestRequest,
+    DatasetTransformSuggestion,
+    DatasetTransformSuggestResponse,
+    DatasetQueryRequest,
+    DatasetQueryResponse,
+    # Jobs
+    JobType,
+    JobStatus,
+    JobResponse,
+    # Artifacts
+    ArtifactType,
+    ArtifactResponse,
+    ArtifactRowsResponse,
+    ReportShareCreateRequest,
+    ReportShareResponse,
+    PublicReportResponse,
+    StorageGcRequest,
+    StorageGcResponse,
+    CachePruneResponse,
     # Analysis
     AnalysisType,
     AnalysisStatus,
     AnalysisCreate,
     AnalysisResponse,
     AnalysisDetailResponse,
+    AnalysisActionKind,
+    SuggestedAction,
+    AnalysisActionRunRequest,
+    AnalysisActionFeedItem,
     # Chat
     MessageRole,
     ChatMessage,
@@ -46,6 +75,8 @@ from app.api.schemas.base import (
     NLQueryResponse,
     # Health
     HealthCheckResponse,
+    # Dashboard
+    DashboardSummary,
 )
 
 __all__ = [
@@ -71,12 +102,41 @@ __all__ = [
     "DatasetResponse",
     "DatasetDetailResponse",
     "DatasetUploadResponse",
+    "DatasetVersionResponse",
+    "DatasetTransformStep",
+    "DatasetTransformPreviewRequest",
+    "DatasetTransformPreviewResponse",
+    "DatasetTransformApplyRequest",
+    "DatasetTransformApplyResponse",
+    "DatasetTransformSuggestRequest",
+    "DatasetTransformSuggestion",
+    "DatasetTransformSuggestResponse",
+    "DatasetQueryRequest",
+    "DatasetQueryResponse",
+    # Jobs
+    "JobType",
+    "JobStatus",
+    "JobResponse",
+    # Artifacts
+    "ArtifactType",
+    "ArtifactResponse",
+    "ArtifactRowsResponse",
+    "ReportShareCreateRequest",
+    "ReportShareResponse",
+    "PublicReportResponse",
+    "StorageGcRequest",
+    "StorageGcResponse",
+    "CachePruneResponse",
     # Analysis
     "AnalysisType",
     "AnalysisStatus",
     "AnalysisCreate",
     "AnalysisResponse",
     "AnalysisDetailResponse",
+    "AnalysisActionKind",
+    "SuggestedAction",
+    "AnalysisActionRunRequest",
+    "AnalysisActionFeedItem",
     # Chat
     "MessageRole",
     "ChatMessage",
@@ -93,4 +153,6 @@ __all__ = [
     "NLQueryResponse",
     # Health
     "HealthCheckResponse",
+    # Dashboard
+    "DashboardSummary",
 ]

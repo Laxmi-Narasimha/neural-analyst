@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +35,7 @@ class PlanStep(BaseModel):
 class DataSpeaksRunRequest(BaseModel):
     dataset_id: UUID
     plan: Optional[list[PlanStep]] = None
+    sample_rows: Optional[int] = None
 
 
 def _artifact_to_dict(a) -> dict[str, Any]:
@@ -65,12 +67,21 @@ async def run_data_speaks(
 ):
     try:
         plan = [s.model_dump() for s in request.plan] if request.plan else eda_p0_plan()
+        sample_rows = request.sample_rows
+        if sample_rows is None:
+            sample_rows = 200_000
+        try:
+            sample_rows = int(sample_rows)
+        except Exception:
+            sample_rows = 200_000
+        sample_rows = max(25, min(sample_rows, 1_000_000))
+
         executor = ComputeExecutor(db)
         results = await executor.run_plan(
             dataset_id=request.dataset_id,
             plan=plan,
             owner_id=user.user_id,
-            sample_rows=200_000,
+            sample_rows=sample_rows,
         )
 
         response_steps = []
@@ -136,4 +147,25 @@ async def download_artifact_data(
     data_path = manifest.get("data_path")
     if not data_path:
         raise HTTPException(status_code=400, detail="Artifact has no downloadable data file")
-    return FileResponse(path=data_path, filename=str(artifact_id))
+    suffix = ""
+    try:
+        suffix = Path(str(data_path)).suffix or ""
+    except Exception:
+        suffix = ""
+    filename = f"{artifact_id}{suffix}" if suffix else str(artifact_id)
+    try:
+        from app.services.object_store import get_object_store, is_s3_uri
+
+        if is_s3_uri(str(data_path)):
+            obj = get_object_store()
+            url = obj.presign_download_url(storage_path=str(data_path), filename=filename)
+            if url:
+                return RedirectResponse(url=url, status_code=307)
+
+            # Fallback: proxy via API by downloading to local cache.
+            local_path = obj.ensure_local_path(str(data_path), filename_hint=filename)
+            return FileResponse(path=str(local_path), filename=filename)
+    except Exception:
+        pass
+
+    return FileResponse(path=data_path, filename=filename)

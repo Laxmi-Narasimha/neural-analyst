@@ -1,166 +1,203 @@
 'use client';
 
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
-import { IconPlus, IconUpload, IconArrowRight, IconChart, IconDatabase, IconTrend, IconTime } from '@/components/icons';
+import api from '@/lib/api';
+import { IconPlus, IconArrowRight, IconChart, IconDatabase, IconTrend, IconTime, IconX, IconLoader } from '@/components/icons';
 import styles from './page.module.css';
 
-const recentAnalyses = [
-    { id: 1, name: 'Q4 Sales Analysis', type: 'EDA', date: '2 hours ago', status: 'complete' },
-    { id: 2, name: 'Customer Churn Model', type: 'ML', date: '1 day ago', status: 'complete' },
-    { id: 3, name: 'Marketing A/B Test', type: 'Stats', date: '3 days ago', status: 'complete' },
-];
+function formatRelative(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    const ms = Date.now() - d.getTime();
+    if (!Number.isFinite(ms)) return '';
 
-const recentDatasets = [
-    { id: 1, name: 'sales_2024.csv', rows: '45,234', cols: 12, size: '4.2 MB' },
-    { id: 2, name: 'customers.parquet', rows: '128,500', cols: 28, size: '15.8 MB' },
-    { id: 3, name: 'transactions.xlsx', rows: '8,921', cols: 8, size: '1.1 MB' },
-];
+    const minutes = Math.floor(ms / 60_000);
+    if (minutes < 1) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours}h ago`;
+    const days = Math.floor(hours / 24);
+    if (days < 30) return `${days}d ago`;
+    return d.toLocaleDateString();
+}
+
+function formatCompactInt(n) {
+    const v = Number(n || 0);
+    if (!Number.isFinite(v)) return '0';
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace('.0', '')}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1).replace('.0', '')}K`;
+    return String(Math.trunc(v));
+}
+
+function formatHours(seconds) {
+    const s = Number(seconds || 0);
+    if (!Number.isFinite(s)) return '0h';
+    return `${(s / 3600).toFixed(1).replace('.0', '')}h`;
+}
 
 export default function DashboardPage() {
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+
+    const [summary, setSummary] = useState(null);
+    const [recentAnalyses, setRecentAnalyses] = useState([]);
+    const [recentDatasets, setRecentDatasets] = useState([]);
+
+    const load = async () => {
+        try {
+            setLoading(true);
+            setError(null);
+
+            const [summaryRes, analysesRes, datasetsRes] = await Promise.all([
+                api.getDashboardSummary(),
+                api.listAnalyses(1, 5),
+                api.listDatasets(1, 5),
+            ]);
+
+            setSummary(summaryRes || null);
+            setRecentAnalyses(analysesRes.items || []);
+            setRecentDatasets(datasetsRes.items || []);
+        } catch (e) {
+            setError(e?.message || 'Failed to load dashboard');
+            setSummary(null);
+            setRecentAnalyses([]);
+            setRecentDatasets([]);
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        load();
+    }, []);
+
+    const stats = useMemo(() => {
+        const analysesThisMonth = summary?.analyses_this_month ?? 0;
+        const datasetsReady = summary?.datasets_ready ?? 0;
+        const rowsProcessed = summary?.rows_processed ?? 0;
+        const computeSeconds = summary?.compute_seconds ?? 0;
+
+        return [
+            { key: 'analyses', label: 'Analyses This Month', value: formatCompactInt(analysesThisMonth), Icon: IconChart },
+            { key: 'datasets', label: 'Ready Datasets', value: formatCompactInt(datasetsReady), Icon: IconDatabase },
+            { key: 'rows', label: 'Rows Processed', value: formatCompactInt(rowsProcessed), Icon: IconTrend },
+            { key: 'compute', label: 'Compute Time', value: formatHours(computeSeconds), Icon: IconTime },
+        ];
+    }, [summary]);
+
     return (
-        <div className={styles.dashboard}>
-            {/* Header */}
+        <div className={styles.main}>
             <div className={styles.header}>
-                <div>
-                    <h1 className={styles.title}>Welcome back</h1>
-                    <p className={styles.subtitle}>Your AI analyst is ready to work</p>
+                <div className={styles.greeting}>
+                    <h1>Welcome back</h1>
+                    <p>Your AI analyst is ready to work (grounded by compute + artifacts)</p>
                 </div>
-                <Link href="/app/analysis/new" className={styles.newBtn}>
-                    <IconPlus size={18} />
-                    New Analysis
-                </Link>
-            </div>
-
-            {/* Stats */}
-            <div className={styles.statsGrid}>
-                <motion.div
-                    className={styles.statCard}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.1 }}
-                >
-                    <div className={styles.statIcon}>
-                        <IconChart size={20} />
-                    </div>
-                    <div className={styles.statContent}>
-                        <span className={styles.statValue}>24</span>
-                        <span className={styles.statLabel}>Analyses This Month</span>
-                    </div>
-                </motion.div>
-                <motion.div
-                    className={styles.statCard}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.2 }}
-                >
-                    <div className={styles.statIcon}>
-                        <IconDatabase size={20} />
-                    </div>
-                    <div className={styles.statContent}>
-                        <span className={styles.statValue}>8</span>
-                        <span className={styles.statLabel}>Active Datasets</span>
-                    </div>
-                </motion.div>
-                <motion.div
-                    className={styles.statCard}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.3 }}
-                >
-                    <div className={styles.statIcon}>
-                        <IconTrend size={20} />
-                    </div>
-                    <div className={styles.statContent}>
-                        <span className={styles.statValue}>2.1M</span>
-                        <span className={styles.statLabel}>Rows Processed</span>
-                    </div>
-                </motion.div>
-                <motion.div
-                    className={styles.statCard}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.4 }}
-                >
-                    <div className={styles.statIcon}>
-                        <IconTime size={20} />
-                    </div>
-                    <div className={styles.statContent}>
-                        <span className={styles.statValue}>4.2h</span>
-                        <span className={styles.statLabel}>Time Saved</span>
-                    </div>
-                </motion.div>
-            </div>
-
-            {/* Quick Actions */}
-            <div className={styles.quickActions}>
-                <h2 className={styles.sectionTitle}>Quick Actions</h2>
-                <div className={styles.actionGrid}>
-                    <Link href="/app/analysis/new" className={styles.actionCard}>
-                        <div className={styles.actionIcon}>
-                            <IconChart size={24} />
-                        </div>
-                        <div className={styles.actionContent}>
-                            <h3>Start Analysis</h3>
-                            <p>Ask questions about your data in natural language</p>
-                        </div>
-                        <IconArrowRight size={18} className={styles.actionArrow} />
+                <div className={styles.actions}>
+                    <Link href="/app/analysis/new" className={styles.primaryBtn}>
+                        <IconPlus size={18} />
+                        New Analysis
                     </Link>
-                    <Link href="/app/datasets/upload" className={styles.actionCard}>
-                        <div className={styles.actionIcon}>
-                            <IconUpload size={24} />
-                        </div>
-                        <div className={styles.actionContent}>
-                            <h3>Upload Dataset</h3>
-                            <p>CSV, Excel, JSON, Parquet supported</p>
-                        </div>
-                        <IconArrowRight size={18} className={styles.actionArrow} />
+                    <Link href="/app/datasets" className={styles.secondaryBtn}>
+                        <IconDatabase size={18} />
+                        Datasets
                     </Link>
                 </div>
             </div>
 
-            {/* Recent Activity */}
-            <div className={styles.recentGrid}>
-                {/* Recent Analyses */}
-                <div className={styles.recentSection}>
+            {error && (
+                <motion.div className={styles.error} initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}>
+                    <IconX size={18} />
+                    {error}
+                    <button className={styles.retry} onClick={load} type="button">Retry</button>
+                </motion.div>
+            )}
+
+            <div className={styles.stats}>
+                {stats.map((s, idx) => (
+                    <motion.div
+                        key={s.key}
+                        className={styles.statCard}
+                        initial={{ opacity: 0, y: 12 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ delay: idx * 0.06 }}
+                    >
+                        <div className={styles.statIcon}>
+                            {loading ? <IconLoader size={20} className={styles.spinning} /> : <s.Icon size={20} />}
+                        </div>
+                        <div className={styles.statLabel}>{s.label}</div>
+                        <div className={styles.statValue}>{loading ? '—' : s.value}</div>
+                    </motion.div>
+                ))}
+            </div>
+
+            <div className={styles.sections}>
+                <div className={styles.section}>
                     <div className={styles.sectionHeader}>
-                        <h2 className={styles.sectionTitle}>Recent Analyses</h2>
-                        <Link href="/app/analysis" className={styles.viewAll}>View All</Link>
+                        <div className={styles.sectionTitle}>Recent Analyses</div>
+                        <Link href="/app/analysis" className={styles.sectionLink}>View all</Link>
                     </div>
-                    <div className={styles.recentList}>
-                        {recentAnalyses.map((analysis) => (
-                            <Link key={analysis.id} href={`/app/analysis/${analysis.id}`} className={styles.recentItem}>
-                                <div className={styles.itemInfo}>
-                                    <span className={styles.itemName}>{analysis.name}</span>
-                                    <span className={styles.itemMeta}>{analysis.type} • {analysis.date}</span>
-                                </div>
-                                <span className={`${styles.status} ${styles[analysis.status]}`}>
-                                    {analysis.status}
-                                </span>
-                            </Link>
-                        ))}
-                    </div>
+                    {loading ? (
+                        <div className={styles.empty}>
+                            <div className={styles.emptyIcon}><IconLoader size={26} className={styles.spinning} /></div>
+                            <p>Loading analyses…</p>
+                        </div>
+                    ) : recentAnalyses.length ? (
+                        <div className={styles.itemList}>
+                            {recentAnalyses.map((a) => (
+                                <Link key={a.id} href={`/app/analysis/${a.id}`} className={styles.item}>
+                                    <div className={styles.itemInfo}>
+                                        <div className={styles.itemName}>{a.name}</div>
+                                        <div className={styles.itemMeta}>
+                                            {String(a.analysis_type || '').toUpperCase()} • {formatRelative(a.created_at)} • {String(a.status || '').toLowerCase()}
+                                        </div>
+                                    </div>
+                                    <IconArrowRight size={18} className={styles.itemArrow} />
+                                </Link>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className={styles.empty}>
+                            <div className={styles.emptyIcon}><IconChart size={28} /></div>
+                            <p>No analyses yet.</p>
+                        </div>
+                    )}
                 </div>
 
-                {/* Recent Datasets */}
-                <div className={styles.recentSection}>
+                <div className={styles.section}>
                     <div className={styles.sectionHeader}>
-                        <h2 className={styles.sectionTitle}>Recent Datasets</h2>
-                        <Link href="/app/datasets" className={styles.viewAll}>View All</Link>
+                        <div className={styles.sectionTitle}>Recent Datasets</div>
+                        <Link href="/app/datasets" className={styles.sectionLink}>View all</Link>
                     </div>
-                    <div className={styles.recentList}>
-                        {recentDatasets.map((dataset) => (
-                            <Link key={dataset.id} href={`/app/datasets/${dataset.id}`} className={styles.recentItem}>
-                                <div className={styles.itemInfo}>
-                                    <span className={styles.itemName}>{dataset.name}</span>
-                                    <span className={styles.itemMeta}>{dataset.rows} rows • {dataset.cols} cols</span>
-                                </div>
-                                <span className={styles.datasetSize}>{dataset.size}</span>
-                            </Link>
-                        ))}
-                    </div>
+                    {loading ? (
+                        <div className={styles.empty}>
+                            <div className={styles.emptyIcon}><IconLoader size={26} className={styles.spinning} /></div>
+                            <p>Loading datasets…</p>
+                        </div>
+                    ) : recentDatasets.length ? (
+                        <div className={styles.itemList}>
+                            {recentDatasets.map((d) => (
+                                <Link key={d.id} href={`/app/analysis/new?dataset=${d.id}`} className={styles.item}>
+                                    <div className={styles.itemInfo}>
+                                        <div className={styles.itemName}>{d.name}</div>
+                                        <div className={styles.itemMeta}>
+                                            {(d.row_count || 0).toLocaleString()} rows • {d.column_count || 0} cols • {String(d.status || '').toLowerCase()}
+                                        </div>
+                                    </div>
+                                    <IconArrowRight size={18} className={styles.itemArrow} />
+                                </Link>
+                            ))}
+                        </div>
+                    ) : (
+                        <div className={styles.empty}>
+                            <div className={styles.emptyIcon}><IconDatabase size={28} /></div>
+                            <p>No datasets yet.</p>
+                        </div>
+                    )}
                 </div>
             </div>
         </div>
     );
 }
+

@@ -1,15 +1,14 @@
 'use client';
 
-import { useState, useCallback } from 'react';
-import axios from 'axios';
+import { useEffect, useMemo, useState } from 'react';
+import Link from 'next/link';
 import ReactMarkdown from 'react-markdown';
 import { motion, AnimatePresence } from 'framer-motion';
-import { IconUpload, IconSparkles, IconLoader, IconCheck, IconAlert, IconDownload, IconRefresh, IconChevronDown, IconChevronUp, IconClock, IconDatabase, IconBrain } from '@/components/icons';
+import { IconSparkles, IconLoader, IconCheck, IconAlert, IconDownload, IconRefresh, IconChevronDown, IconChevronUp, IconClock, IconDatabase, IconBrain } from '@/components/icons';
 import QuestionsForm from './QuestionsForm';
 import ReadinessBadge from './ReadinessBadge';
 import toast from 'react-hot-toast';
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+import api from '@/lib/api';
 
 interface TechnicalDetails {
     namespace?: string;
@@ -47,7 +46,9 @@ export default function QualityDashboard() {
     const [step, setStep] = useState<'initial' | 'processing' | 'questions' | 'results' | 'error'>('initial');
     const [datasetGoal, setDatasetGoal] = useState('');
     const [domain, setDomain] = useState('general');
-    const [files, setFiles] = useState<File[]>([]);
+    const [datasets, setDatasets] = useState<any[]>([]);
+    const [datasetsLoading, setDatasetsLoading] = useState(false);
+    const [selectedDatasetId, setSelectedDatasetId] = useState<string>('');
     const [uploading, setUploading] = useState(false);
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [questions, setQuestions] = useState<any[]>([]);
@@ -73,22 +74,35 @@ export default function QualityDashboard() {
         });
     };
 
-    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files) {
-            setFiles(Array.from(e.target.files));
-        }
-    };
+    useEffect(() => {
+        const load = async () => {
+            try {
+                setDatasetsLoading(true);
+                const res = await api.listDatasets(1, 200);
+                const items = res.items || [];
+                setDatasets(items);
+                if (!selectedDatasetId && items?.[0]?.id) {
+                    setSelectedDatasetId(String(items[0].id));
+                }
+            } catch (e: any) {
+                setDatasets([]);
+                toast.error(e?.message || 'Failed to load datasets');
+            } finally {
+                setDatasetsLoading(false);
+            }
+        };
 
-    const handleDrop = useCallback((e: React.DragEvent) => {
-        e.preventDefault();
-        if (e.dataTransfer.files) {
-            setFiles(Array.from(e.dataTransfer.files));
-        }
+        load();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    const selectedDataset = useMemo(() => {
+        return datasets.find((d) => String(d?.id) === String(selectedDatasetId)) || null;
+    }, [datasets, selectedDatasetId]);
+
     const startAnalysis = async () => {
-        if (!datasetGoal || files.length === 0) {
-            toast.error('Please provide a goal and upload files');
+        if (!datasetGoal || !selectedDatasetId) {
+            toast.error('Please provide a goal and select a dataset');
             return;
         }
 
@@ -96,15 +110,7 @@ export default function QualityDashboard() {
         setUploading(true);
 
         try {
-            const filePaths = files.map(f => `uploads/${f.name}`);
-
-            const response = await axios.post(`${API_BASE}/api/v1/quality/validate`, {
-                goal: datasetGoal,
-                domain: domain,
-                files: filePaths
-            });
-
-            const data = response.data;
+            const data = await api.startQualityValidation(datasetGoal, domain, selectedDatasetId);
             setSessionId(data.session_id);
 
             if (data.step === 'clarifying_questions') {
@@ -119,7 +125,7 @@ export default function QualityDashboard() {
             }
         } catch (error: any) {
             console.error('Analysis error:', error);
-            toast.error(error.response?.data?.detail || 'Failed to start analysis');
+            toast.error(error?.message || 'Failed to start analysis');
             setStep('error');
         } finally {
             setUploading(false);
@@ -130,12 +136,7 @@ export default function QualityDashboard() {
         setStep('processing');
 
         try {
-            const response = await axios.post(`${API_BASE}/api/v1/quality/continue`, {
-                session_id: sessionId,
-                answers: answers
-            });
-
-            const data = response.data;
+            const data = await api.continueQualityValidation(sessionId, answers);
 
             if (data.success) {
                 setResults(data);
@@ -146,7 +147,7 @@ export default function QualityDashboard() {
             }
         } catch (error: any) {
             console.error('Validation error:', error);
-            toast.error(error.response?.data?.detail || 'Failed to submit answers');
+            toast.error(error?.message || 'Failed to submit answers');
             setStep('questions');
         }
     };
@@ -184,7 +185,6 @@ export default function QualityDashboard() {
     const resetAnalysis = () => {
         setStep('initial');
         setDatasetGoal('');
-        setFiles([]);
         setSessionId(null);
         setQuestions([]);
         setResults(null);
@@ -239,47 +239,61 @@ export default function QualityDashboard() {
                                 </div>
                             </div>
 
-                            {/* Right Column - File Upload */}
-                            <div>
-                                <label className="block text-sm font-medium text-gray-400 mb-2">Knowledge Base Files</label>
-                                <div
-                                    className="border-2 border-dashed border-gray-700 rounded-xl p-8 flex flex-col items-center justify-center text-center hover:border-cyan-500/50 transition-all bg-[#2a2a2a]/50 min-h-[240px] cursor-pointer"
-                                    onDrop={handleDrop}
-                                    onDragOver={(e) => e.preventDefault()}
-                                    onClick={() => document.getElementById('file-upload')?.click()}
-                                >
-                                    <IconUpload className="text-gray-500 mb-4" size={48} />
-                                    <input
-                                        type="file"
-                                        multiple
-                                        onChange={handleFileChange}
-                                        className="hidden"
-                                        id="file-upload"
-                                        accept=".pdf,.docx,.txt,.csv,.xlsx"
-                                    />
-                                    <span className="text-cyan-500 font-semibold hover:text-cyan-400">Upload files</span>
-                                    <span className="text-gray-500 text-sm mt-1">or drag and drop</span>
-                                    <p className="text-xs text-gray-600 mt-3">PDF, DOCX, TXT, CSV, XLSX supported</p>
-
-                                    {files.length > 0 && (
-                                        <div className="mt-6 w-full max-h-[100px] overflow-y-auto border-t border-gray-700 pt-4">
-                                            {files.map((f, i) => (
-                                                <div key={i} className="text-sm text-gray-300 flex items-center gap-2 py-1">
-                                                    <IconCheck size={14} className="text-green-500 flex-shrink-0" />
-                                                    <span className="truncate">{f.name}</span>
-                                                    <span className="text-gray-600 text-xs">({(f.size / 1024).toFixed(1)} KB)</span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    )}
+                            {/* Right Column - Dataset Selector */}
+                            <div className="space-y-5">
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-400 mb-2">Dataset</label>
+                                    <select
+                                        value={selectedDatasetId}
+                                        onChange={(e) => setSelectedDatasetId(e.target.value)}
+                                        disabled={datasetsLoading}
+                                        className="w-full bg-[#2a2a2a] border border-gray-700 rounded-xl p-4 text-gray-200 focus:ring-2 focus:ring-cyan-500 outline-none transition-all"
+                                    >
+                                        <option value="" disabled>Select a dataset</option>
+                                        {datasets.map((d) => (
+                                            <option key={d.id} value={d.id}>
+                                                {d.name} ({d.status})
+                                            </option>
+                                        ))}
+                                    </select>
+                                    <p className="text-xs text-gray-500 mt-2">
+                                        Upload a dataset in <Link href="/app/datasets" className="text-cyan-400 hover:text-cyan-300">Datasets</Link>.
+                                    </p>
                                 </div>
+
+                                {selectedDataset && (
+                                    <div className="bg-[#2a2a2a] rounded-xl border border-gray-700 p-5">
+                                        <div className="flex items-center gap-3 text-gray-200">
+                                            <IconDatabase size={18} className="text-cyan-400" />
+                                            <div className="font-semibold">{selectedDataset.name}</div>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-3 mt-4 text-sm text-gray-400">
+                                            <div>
+                                                <div className="text-xs uppercase tracking-wide text-gray-500">Status</div>
+                                                <div className="text-gray-200">{selectedDataset.status}</div>
+                                            </div>
+                                            <div>
+                                                <div className="text-xs uppercase tracking-wide text-gray-500">Format</div>
+                                                <div className="text-gray-200">{String(selectedDataset.file_format || '').toUpperCase()}</div>
+                                            </div>
+                                            <div>
+                                                <div className="text-xs uppercase tracking-wide text-gray-500">Rows</div>
+                                                <div className="text-gray-200">{(selectedDataset.row_count || 0).toLocaleString()}</div>
+                                            </div>
+                                            <div>
+                                                <div className="text-xs uppercase tracking-wide text-gray-500">Columns</div>
+                                                <div className="text-gray-200">{selectedDataset.column_count || 0}</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         </div>
 
                         <div className="flex justify-end pt-4">
                             <button
                                 onClick={startAnalysis}
-                                disabled={!datasetGoal || files.length === 0}
+                                disabled={!datasetGoal || !selectedDatasetId || datasetsLoading}
                                 className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold py-4 px-10 rounded-xl shadow-lg shadow-cyan-500/20 transition-all disabled:opacity-50 disabled:shadow-none disabled:cursor-not-allowed flex items-center gap-3 text-lg"
                             >
                                 <IconSparkles size={22} />
@@ -355,11 +369,11 @@ export default function QualityDashboard() {
                                 </p>
                             </div>
                             <div className="bg-gradient-to-br from-[#2a2a2a] to-[#222] p-5 rounded-xl border border-gray-700">
-                                <p className="text-sm text-gray-400 mb-1">Files Processed</p>
+                                <p className="text-sm text-gray-400 mb-1">Datasets Processed</p>
                                 <div className="flex items-center gap-2">
                                     <IconDatabase size={24} className="text-blue-400" />
                                     <p className="text-4xl font-bold text-white">
-                                        {results.technical_details?.files_processed || files.length}
+                                        {results.technical_details?.files_processed || 1}
                                     </p>
                                 </div>
                             </div>

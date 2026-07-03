@@ -30,10 +30,38 @@ class LogLevel(str, Enum):
     CRITICAL = "CRITICAL"
 
 
+class JobExecutor(str, Enum):
+    """How background jobs are executed."""
+
+    LOCAL = "local"    # in-process background tasks (dev)
+    CELERY = "celery"  # distributed workers (prod)
+
+
+class NarratorMode(str, Enum):
+    """How narratives are generated from evidence artifacts."""
+
+    DETERMINISTIC = "deterministic"
+    LLM = "llm"
+
+
+class ObjectStoreBackend(str, Enum):
+    """Where uploads/artifacts are stored."""
+
+    LOCAL = "local"
+    S3 = "s3"
+
+
+class AuthMode(str, Enum):
+    """Authentication mode."""
+
+    LOCAL = "local"    # No login required, auto-creates a default user
+    JWT = "jwt"        # Full JWT authentication with registration/login
+
+
 class DatabaseConfig(BaseSettings):
     """Database configuration with connection pooling settings."""
     
-    model_config = SettingsConfigDict(env_prefix="DB_")
+    model_config = SettingsConfigDict(env_prefix="DB_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # Optional full URL (useful for cloud providers like Render/Neon)
     # Examples:
@@ -109,12 +137,128 @@ class RedisConfig(BaseSettings):
         return f"redis://{self.host}:{self.port}/{self.db}"
 
 
+class ObjectStoreConfig(BaseSettings):
+    """Object store configuration for uploads/artifacts (local disk or S3-compatible)."""
+
+    model_config = SettingsConfigDict(env_prefix="OBJECT_STORE_")
+
+    backend: ObjectStoreBackend = Field(
+        default=ObjectStoreBackend.LOCAL,
+        validation_alias=AliasChoices("STORAGE_BACKEND", "OBJECT_STORE_BACKEND"),
+        description="Storage backend: local (disk) or s3 (S3-compatible object storage).",
+    )
+
+    # S3 settings (only used when backend=s3). Credentials can be omitted to use the default AWS chain.
+    s3_bucket: str = Field(
+        default="",
+        validation_alias=AliasChoices("S3_BUCKET", "OBJECT_STORE_S3_BUCKET"),
+        description="S3 bucket for uploads/artifacts (required when backend=s3).",
+    )
+    s3_prefix: str = Field(
+        default="neural-analyst",
+        validation_alias=AliasChoices("S3_PREFIX", "OBJECT_STORE_S3_PREFIX"),
+        description="Optional key prefix inside the bucket (e.g., 'neural-analyst').",
+    )
+    s3_region: str = Field(
+        default="us-east-1",
+        validation_alias=AliasChoices("S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION", "OBJECT_STORE_S3_REGION"),
+        description="AWS region (or any string for S3-compatible endpoints).",
+    )
+    s3_endpoint_url: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("S3_ENDPOINT_URL", "OBJECT_STORE_S3_ENDPOINT_URL"),
+        description="Optional custom endpoint URL (e.g., MinIO).",
+    )
+    s3_access_key_id: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("S3_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID", "OBJECT_STORE_S3_ACCESS_KEY_ID"),
+    )
+    s3_secret_access_key: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("S3_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY", "OBJECT_STORE_S3_SECRET_ACCESS_KEY"),
+    )
+    s3_session_token: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("S3_SESSION_TOKEN", "AWS_SESSION_TOKEN", "OBJECT_STORE_S3_SESSION_TOKEN"),
+    )
+    s3_force_path_style: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("S3_FORCE_PATH_STYLE", "OBJECT_STORE_S3_FORCE_PATH_STYLE"),
+        description="Force path-style addressing (often needed for MinIO).",
+    )
+
+    # Download behavior
+    presign_expires_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=7 * 24 * 3600,
+        validation_alias=AliasChoices("S3_PRESIGN_EXPIRES_SECONDS", "OBJECT_STORE_PRESIGN_EXPIRES_SECONDS"),
+        description="Expiration for pre-signed download URLs (seconds).",
+    )
+
+    # Local cache for remote objects (S3 -> temp local file for compute, DuckDB, parsers, etc).
+    cache_dir: Path = Field(
+        default=Path("./storage_cache"),
+        validation_alias=AliasChoices("STORAGE_CACHE_DIR", "OBJECT_STORE_CACHE_DIR"),
+        description="Local cache directory for remote objects (used when backend=s3).",
+    )
+
+    cache_ttl_days: int = Field(
+        default=7,
+        ge=0,
+        le=3650,
+        validation_alias=AliasChoices("CACHE_TTL_DAYS", "OBJECT_STORE_CACHE_TTL_DAYS"),
+        description="Best-effort TTL for cached remote objects. 0 disables age-based pruning.",
+    )
+
+    cache_max_bytes: int = Field(
+        default=10 * 1024 * 1024 * 1024,  # 10GB
+        ge=0,
+        validation_alias=AliasChoices("CACHE_MAX_BYTES", "OBJECT_STORE_CACHE_MAX_BYTES"),
+        description="Best-effort max size for the cache dir. 0 disables size-based pruning.",
+    )
+
+    @field_validator("cache_dir")
+    @classmethod
+    def ensure_cache_dir_exists(cls, v: Any) -> Any:
+        if isinstance(v, Path):
+            v.mkdir(parents=True, exist_ok=True)
+        return v
+
+
+class ConnectionsConfig(BaseSettings):
+    """External connection settings (encryption + guardrails)."""
+
+    model_config = SettingsConfigDict(env_prefix="CONNECTIONS_")
+
+    # Secrets must be encrypted at rest. This key can be provided either as a
+    # Fernet key (urlsafe-base64 32-byte) or as a passphrase (we derive a Fernet
+    # key deterministically from it).
+    encryption_key: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "CONNECTIONS_ENCRYPTION_KEY",
+            "CONNECTION_ENCRYPTION_KEY",
+            "CONNECTION_SECRET_KEY",
+            "APP_ENCRYPTION_KEY",
+        ),
+        description="Key/passphrase used to encrypt stored connector secrets",
+    )
+
+    # Query guardrails (defaults are conservative for interactive use).
+    max_query_rows: int = Field(default=1000, ge=100, le=50000)
+    query_timeout_seconds: int = Field(default=15, ge=1, le=600)
+
+    # Import guardrails (cap data pulled from external sources).
+    max_import_rows: int = Field(default=200000, ge=1000, le=5000000)
+
+
 class OpenAIConfig(BaseSettings):
     """OpenAI API configuration."""
     
     model_config = SettingsConfigDict(env_prefix="OPENAI_")
     
-    api_key: SecretStr = Field(..., description="OpenAI API key")
+    api_key: Optional[SecretStr] = Field(default=None, description="OpenAI API key (optional for local/Ollama use)")
     organization: Optional[str] = Field(default=None, description="OpenAI organization ID")
     
     # Model settings
@@ -130,12 +274,34 @@ class OpenAIConfig(BaseSettings):
     temperature_default: float = Field(default=0.0, ge=0.0, le=2.0)
 
 
+class NarratorConfig(BaseSettings):
+    """Narration settings for turning evidence artifacts into human-readable stories."""
+
+    model_config = SettingsConfigDict(env_prefix="NARRATOR_")
+
+    mode: NarratorMode = Field(
+        default=NarratorMode.DETERMINISTIC,
+        description="Narration engine: deterministic (safe, offline) or llm (external model rewrite).",
+    )
+    model: str = Field(default="gpt-4o-mini", description="LLM model to use when mode=llm")
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    max_tokens: int = Field(default=1200, ge=128, le=8000)
+
+
+class VectorStoreBackend(str, Enum):
+    """Available vector store backends."""
+
+    NONE = "none"          # Disabled — no vector search
+    CHROMA = "chroma"      # Embedded ChromaDB (zero-config, default)
+    PINECONE = "pinecone"  # Managed Pinecone (requires API key)
+
+
 class PineconeConfig(BaseSettings):
     """Pinecone vector store configuration."""
     
     model_config = SettingsConfigDict(env_prefix="PINECONE_")
     
-    api_key: SecretStr = Field(..., description="Pinecone API key")
+    api_key: Optional[SecretStr] = Field(default=None, description="Pinecone API key (required only when VECTOR_STORE=pinecone)")
     environment: str = Field(default="us-east-1", description="Pinecone environment")
     index_name: str = Field(default="ai-data-analyst", description="Default index name")
     
@@ -173,13 +339,13 @@ class SecurityConfig(BaseSettings):
     
     model_config = SettingsConfigDict(env_prefix="SECURITY_")
     
-    secret_key: SecretStr = Field(..., description="Application secret key")
+    secret_key: SecretStr = Field(default=SecretStr("dev-secret-change-in-production"), description="Application secret key")
     algorithm: str = Field(default="HS256", description="JWT algorithm")
     access_token_expire_minutes: int = Field(default=30, ge=5, le=1440)
     refresh_token_expire_days: int = Field(default=7, ge=1, le=30)
     
     # CORS settings
-    cors_origins: list[str] = Field(default=["http://localhost:3000"])
+    cors_origins: list[str] = Field(default=["http://localhost:3000", "http://localhost:3002"])
     cors_allow_credentials: bool = Field(default=True)
     cors_allow_methods: list[str] = Field(default=["*"])
     cors_allow_headers: list[str] = Field(default=["*"])
@@ -240,13 +406,41 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8000, ge=1000, le=65535)
     workers: int = Field(default=4, ge=1, le=32)
+
+    # Job execution
+    job_executor: JobExecutor = Field(
+        default=JobExecutor.LOCAL,
+        validation_alias=AliasChoices("JOB_EXECUTOR", "JOB_EXECUTION_MODE"),
+        description="Background job execution mode: local (dev) or celery (distributed)",
+    )
+
+    # Authentication mode
+    auth_mode: AuthMode = Field(
+        default=AuthMode.LOCAL,
+        validation_alias=AliasChoices("AUTH_MODE", "AUTHENTICATION_MODE"),
+        description="Authentication mode: local (no login, auto-user) or jwt (full auth)",
+    )
+
+    # LLM provider-agnostic model setting
+    llm_model: str = Field(
+        default="gpt-4o-mini",
+        validation_alias=AliasChoices("LLM_MODEL", "DEFAULT_LLM_MODEL"),
+        description="LLM model to use (e.g., gpt-4o, claude-sonnet-4-20250514, ollama/llama3)",
+    )
+
+    # Vector store
+    vector_store: VectorStoreBackend = Field(
+        default=VectorStoreBackend.NONE,
+        validation_alias=AliasChoices("VECTOR_STORE", "VECTOR_STORE_BACKEND"),
+        description="Vector store backend: none, chroma, or pinecone",
+    )
     
     # Logging
     log_level: LogLevel = Field(default=LogLevel.INFO)
     log_format: str = Field(default="json")  # json or text
     
     # File upload settings
-    max_upload_size_mb: int = Field(default=100, ge=1, le=1000)
+    max_upload_size_mb: int = Field(default=1024, ge=1, le=2048)
     allowed_extensions: list[str] = Field(
         default=["csv", "xlsx", "xls", "json", "parquet", "pdf", "docx", "txt"]
     )
@@ -256,11 +450,14 @@ class Settings(BaseSettings):
     # Nested configurations
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     redis: RedisConfig = Field(default_factory=RedisConfig)
-    openai: OpenAIConfig = Field(default_factory=lambda: OpenAIConfig(api_key=SecretStr(os.getenv("OPENAI_API_KEY", ""))))
-    pinecone: PineconeConfig = Field(default_factory=lambda: PineconeConfig(api_key=SecretStr(os.getenv("PINECONE_API_KEY", ""))))
+    object_store: ObjectStoreConfig = Field(default_factory=ObjectStoreConfig)
+    connections: ConnectionsConfig = Field(default_factory=ConnectionsConfig)
+    openai: OpenAIConfig = Field(default_factory=OpenAIConfig)
+    pinecone: PineconeConfig = Field(default_factory=PineconeConfig)
     celery: CeleryConfig = Field(default_factory=CeleryConfig)
-    security: SecurityConfig = Field(default_factory=lambda: SecurityConfig(secret_key=SecretStr(os.getenv("SECRET_KEY", "dev-secret-key"))))
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
     ml: MLConfig = Field(default_factory=MLConfig)
+    narrator: NarratorConfig = Field(default_factory=NarratorConfig)
     
     @field_validator("upload_directory", "artifact_directory")
     @classmethod
@@ -268,6 +465,20 @@ class Settings(BaseSettings):
         """Ensure directories exist on initialization."""
         if isinstance(v, Path):
             v.mkdir(parents=True, exist_ok=True)
+        return v
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def coerce_debug_flag(cls, v: Any) -> Any:
+        """Accept common environment-style debug aliases instead of crashing on startup."""
+        if isinstance(v, bool) or v is None:
+            return v
+        if isinstance(v, str):
+            normalized = v.strip().lower()
+            if normalized in {"1", "true", "yes", "on", "debug", "dev", "development"}:
+                return True
+            if normalized in {"0", "false", "no", "off", "release", "prod", "production"}:
+                return False
         return v
     
     @property

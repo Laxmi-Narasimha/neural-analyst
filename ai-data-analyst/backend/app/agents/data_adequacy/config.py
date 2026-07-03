@@ -13,7 +13,7 @@ class Config:
     """Application configuration adapter."""
     
     # API Keys - mapped from main settings
-    OPENAI_API_KEY: str = settings.openai.api_key.get_secret_value()
+    OPENAI_API_KEY: str = settings.openai.api_key.get_secret_value() if settings.openai.api_key else ""
     # Handle optional Pinecone key
     PINECONE_API_KEY: str = settings.pinecone.api_key.get_secret_value() if settings.pinecone.api_key else ""
     PINECONE_ENVIRONMENT: str = settings.pinecone.environment
@@ -97,7 +97,7 @@ class Config:
         """Validate required configuration values."""
         # Main settings should already be validated at startup
         if not cls.OPENAI_API_KEY:
-             raise ValueError("Missing OpenAI API Key")
+             return False  # Non-fatal: LLM features won't work but app still starts
         return True
     
     @classmethod
