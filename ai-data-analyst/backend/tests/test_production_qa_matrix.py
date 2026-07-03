@@ -137,6 +137,12 @@ async def qa_env(tmp_path_factory):
         settings.artifact_directory = old_artifact
         settings.auth_mode = old_auth
         settings.security.rate_limit_requests = old_rate_limit
+        try:
+            from app.main import RateLimitMiddleware
+
+            RateLimitMiddleware._requests.clear()
+        except Exception:
+            pass
 
 
 @pytest_asyncio.fixture(scope="module")

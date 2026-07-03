@@ -261,6 +261,30 @@ async def db_session(tmp_path):
 
 
 # =============================================================================
+# Rate limit reset (in-memory middleware state leaks across test modules)
+# =============================================================================
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_middleware():
+    """Clear in-memory rate limit counters before each test."""
+    try:
+        from app.main import RateLimitMiddleware
+        from app.core.config import settings
+
+        RateLimitMiddleware._requests.clear()
+        settings.security.rate_limit_requests = max(int(settings.security.rate_limit_requests), 10_000)
+    except Exception:
+        pass
+    yield
+    try:
+        from app.main import RateLimitMiddleware
+
+        RateLimitMiddleware._requests.clear()
+    except Exception:
+        pass
+
+
+# =============================================================================
 # Pytest Configuration
 # =============================================================================
 

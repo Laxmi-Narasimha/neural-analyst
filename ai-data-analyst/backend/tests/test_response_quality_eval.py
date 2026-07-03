@@ -187,6 +187,7 @@ async def quality_client(tmp_path_factory):
                     json={"email": email, "password": password, "role": "analyst", "full_name": "Quality Eval"},
                 )
                 login = await client.post("/api/v1/auth/login", json={"email": email, "password": password})
+                assert login.status_code == 200, login.text
                 token = login.json()["access_token"]
                 headers = {"Authorization": f"Bearer {token}"}
                 yield client, headers
