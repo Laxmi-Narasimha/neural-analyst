@@ -18,6 +18,9 @@ from app.agents.base_agent import (
 )
 from app.services.llm_service import get_llm_service, Message as LLMMessage, LLMResponse
 from app.core.logging import get_logger, LogContext
+from app.compute.executor import ComputeExecutor, ExecutionResult
+from app.core.exceptions import AgentException
+from app.services.database import db_manager
 
 logger = get_logger(__name__)
 
@@ -42,6 +45,48 @@ class OrchestratorAgent(BaseAgent[dict[str, Any]]):
     
     def __init__(self, llm_client=None) -> None:
         super().__init__(llm_client or get_llm_service())
+        self._active_user_id: UUID | None = None
+        self._active_dataset_id: UUID | None = None
+        self._session = None
+        self._compute: ComputeExecutor | None = None
+
+    def _require_compute(self, dataset_id: str) -> tuple[UUID, ComputeExecutor, UUID]:
+        if self._active_user_id is None:
+            raise AgentException(message="Orchestrator tool calls require an authenticated user")
+
+        try:
+            ds = UUID(str(dataset_id))
+        except Exception as e:
+            raise AgentException(message=f"Invalid dataset_id: {dataset_id}") from e
+
+        if self._active_dataset_id is not None and ds != self._active_dataset_id:
+            raise AgentException(message="Tool dataset_id does not match the active dataset context")
+
+        if self._compute is None:
+            raise AgentException(message="Compute engine is not initialized")
+
+        return ds, self._compute, self._active_user_id
+
+    def _execution_result_to_dict(self, r: ExecutionResult) -> dict[str, Any]:
+        return {
+            "operator": r.operator_name,
+            "summary": r.summary,
+            "artifacts": [
+                {
+                    "artifact_id": str(a.artifact_id),
+                    "artifact_type": getattr(a.artifact_type, "value", None),
+                    "name": a.name,
+                    "created_at": a.created_at,
+                    "storage_path": a.storage_path,
+                    "preview": a.preview,
+                    "dataset_id": str(a.dataset_id) if a.dataset_id else None,
+                    "dataset_version": a.dataset_version,
+                    "operator_name": a.operator_name,
+                    "operator_params": a.operator_params or {},
+                }
+                for a in r.artifacts
+            ],
+        }
     
     def _register_tools(self) -> None:
         """Register orchestrator tools."""
@@ -147,100 +192,122 @@ class OrchestratorAgent(BaseAgent[dict[str, Any]]):
             context=log_context
         )
         
-        # Build initial messages for ReAct loop
-        messages = self._build_initial_messages(context)
-        
-        # ReAct loop
-        max_iterations = 10
-        results: dict[str, Any] = {
-            "actions": [],
-            "insights": [],
-            "visualizations": [],
-            "final_answer": ""
-        }
-        
-        for iteration in range(max_iterations):
-            if self._state:
-                self._state.current_step = iteration
-            
-            # Get LLM response with function calling
-            response = await self._llm_client.complete(
-                messages=messages,
-                tools=[tool.to_openai_function() for tool in self._tools.values()],
-                tool_choice="auto"
-            )
-            
-            # Check if we need to call a tool
-            if response.tool_calls:
-                for tool_call in response.tool_calls:
-                    tool_name = tool_call["function"]["name"]
-                    tool_args = json.loads(tool_call["function"]["arguments"])
-                    
-                    logger.debug(
-                        f"Executing tool: {tool_name}",
-                        context=log_context,
-                        args=tool_args
+        self._active_user_id = context.user_id
+        self._active_dataset_id = context.dataset_id
+        self._compute = None
+
+        try:
+            async with db_manager.session() as session:
+                self._session = session
+                self._compute = ComputeExecutor(session)
+
+                # Build initial messages for ReAct loop
+                messages = self._build_initial_messages(context)
+
+                # ReAct loop
+                max_iterations = 10
+                results: dict[str, Any] = {
+                    "actions": [],
+                    "insights": [],
+                    "visualizations": [],
+                    "final_answer": "",
+                }
+
+                for iteration in range(max_iterations):
+                    if self._state:
+                        self._state.current_step = iteration
+
+                    # Get LLM response with function calling
+                    response = await self._llm_client.complete(
+                        messages=messages,
+                        tools=[tool.to_openai_function() for tool in self._tools.values()],
+                        tool_choice="auto",
                     )
-                    
-                    # Execute tool
-                    try:
-                        tool_result = await self.execute_tool(
-                            tool_name,
-                            thought=f"Executing {tool_name} for analysis",
-                            **tool_args
-                        )
-                        
-                        results["actions"].append({
-                            "tool": tool_name,
-                            "args": tool_args,
-                            "result": tool_result
-                        })
-                        
-                        # Add tool result to messages
-                        messages.append(LLMMessage(
-                            role="assistant",
-                            content=None,
-                            tool_calls=[tool_call]
-                        ))
-                        messages.append(LLMMessage(
-                            role="tool",
-                            content=json.dumps(tool_result),
-                            tool_call_id=tool_call["id"]
-                        ))
-                        
-                    except Exception as e:
-                        logger.error(
-                            f"Tool execution failed: {e}",
-                            context=log_context
-                        )
-                        messages.append(LLMMessage(
-                            role="tool",
-                            content=json.dumps({"error": str(e)}),
-                            tool_call_id=tool_call["id"]
-                        ))
-            else:
-                # No more tools to call - we have the final answer
-                results["final_answer"] = response.content
-                
-                if response.content:
-                    # Extract any insights mentioned
-                    results["insights"] = self._extract_insights(response.content)
-                
-                break
-        
-        # Add to memory
-        self._memory.add_to_episodic_memory(
-            content=f"Completed analysis: {results['final_answer'][:200]}",
-            memory_type="analysis_result",
-            metadata={"actions_count": len(results["actions"])}
-        )
-        
-        logger.info(
-            f"Orchestration complete with {len(results['actions'])} actions",
-            context=log_context
-        )
-        
-        return results
+
+                    # Check if we need to call a tool
+                    if response.tool_calls:
+                        for tool_call in response.tool_calls:
+                            tool_name = tool_call["function"]["name"]
+                            tool_args = json.loads(tool_call["function"]["arguments"])
+
+                            logger.debug(
+                                f"Executing tool: {tool_name}",
+                                context=log_context,
+                                args=tool_args,
+                            )
+
+                            # Execute tool
+                            try:
+                                tool_result = await self.execute_tool(
+                                    tool_name,
+                                    thought=f"Executing {tool_name} for analysis",
+                                    **tool_args,
+                                )
+
+                                results["actions"].append(
+                                    {
+                                        "tool": tool_name,
+                                        "args": tool_args,
+                                        "result": tool_result,
+                                    }
+                                )
+
+                                # Add tool result to messages
+                                messages.append(
+                                    LLMMessage(
+                                        role="assistant",
+                                        content=None,
+                                        tool_calls=[tool_call],
+                                    )
+                                )
+                                messages.append(
+                                    LLMMessage(
+                                        role="tool",
+                                        content=json.dumps(tool_result),
+                                        tool_call_id=tool_call["id"],
+                                    )
+                                )
+
+                            except Exception as e:
+                                logger.error(
+                                    f"Tool execution failed: {e}",
+                                    context=log_context,
+                                )
+                                messages.append(
+                                    LLMMessage(
+                                        role="tool",
+                                        content=json.dumps({"error": str(e)}),
+                                        tool_call_id=tool_call["id"],
+                                    )
+                                )
+                    else:
+                        # No more tools to call - we have the final answer
+                        results["final_answer"] = response.content
+
+                        if response.content:
+                            # Extract any insights mentioned
+                            results["insights"] = self._extract_insights(response.content)
+
+                        break
+
+                # Add to memory
+                self._memory.add_to_episodic_memory(
+                    content=f"Completed analysis: {results['final_answer'][:200]}",
+                    memory_type="analysis_result",
+                    metadata={"actions_count": len(results["actions"])},
+                )
+
+                logger.info(
+                    f"Orchestration complete with {len(results['actions'])} actions",
+                    context=log_context,
+                )
+
+                return results
+        finally:
+            self._session = None
+            self._compute = None
+            self._active_user_id = None
+            self._active_dataset_id = None
     
     def _build_initial_messages(self, context: AgentContext) -> list[LLMMessage]:
         """Build initial messages for ReAct loop."""
@@ -267,6 +334,11 @@ When analyzing:
 4. Provide clear, actionable insights
 
 Always explain your reasoning and methodology.
+
+Non-negotiable grounding rule:
+- Never fabricate numeric values or dataset facts.
+- If the user asks for dataset-specific numbers, you MUST call tools and cite the tool outputs.
+- If a tool returns an error or insufficient evidence, say you cannot compute it yet and ask a minimal clarification.
 """
         
         messages = [
@@ -326,22 +398,24 @@ Always explain your reasoning and methodology.
         columns: list[str] = None
     ) -> dict[str, Any]:
         """Analyze dataset and return summary statistics."""
-        # This would integrate with actual data access
-        # For now, return structured placeholder
+        ds, compute, owner_id = self._require_compute(dataset_id)
+
+        plan = [
+            {"operator": "dataset_overview", "params": {}},
+            {"operator": "schema_snapshot", "params": {}},
+            {"operator": "missingness_scan", "params": {}},
+            {"operator": "numeric_summary", "params": {"max_columns": 25}},
+        ]
+        if columns:
+            # Columns are not yet supported as a first-class operator parameter in P0;
+            # keep the API stable and ignore for now rather than hallucinating.
+            pass
+
+        results = await compute.run_plan(dataset_id=ds, plan=plan, owner_id=owner_id, sample_rows=200_000)
         return {
             "status": "success",
-            "summary": {
-                "dataset_id": dataset_id,
-                "analyzed_columns": columns or ["all"],
-                "shape": {"rows": 1000, "columns": 10},
-                "memory_mb": 5.2,
-                "dtypes": {"numeric": 5, "categorical": 3, "datetime": 2},
-                "missing_percentage": 2.5
-            },
-            "recommendations": [
-                "Consider imputing missing values in column 'age'",
-                "Column 'category' has high cardinality"
-            ]
+            "dataset_id": str(ds),
+            "runs": [self._execution_result_to_dict(r) for r in results],
         }
     
     async def _run_statistical_analysis(
@@ -352,16 +426,25 @@ Always explain your reasoning and methodology.
         config: dict = None
     ) -> dict[str, Any]:
         """Run statistical analysis on dataset."""
+        ds, compute, owner_id = self._require_compute(dataset_id)
+        t = str(analysis_type or "").strip().lower()
+
+        if t == "correlation":
+            plan = [{"operator": "correlation_matrix", "params": {"max_columns": 25}}]
+        elif t == "distribution":
+            plan = [
+                {"operator": "numeric_summary", "params": {"max_columns": 25}},
+                {"operator": "categorical_topk", "params": {"k": 10, "max_columns": 10}},
+            ]
+        else:
+            raise AgentException(message=f"Unsupported analysis_type for P0: {analysis_type}")
+
+        results = await compute.run_plan(dataset_id=ds, plan=plan, owner_id=owner_id, sample_rows=200_000)
         return {
             "status": "success",
-            "analysis_type": analysis_type,
-            "results": {
-                "test_statistic": 4.52,
-                "p_value": 0.023,
-                "effect_size": 0.35,
-                "confidence_interval": [0.15, 0.55]
-            },
-            "interpretation": f"The {analysis_type} analysis shows statistically significant results (p < 0.05)"
+            "analysis_type": t,
+            "dataset_id": str(ds),
+            "runs": [self._execution_result_to_dict(r) for r in results],
         }
     
     async def _train_ml_model(
@@ -373,23 +456,9 @@ Always explain your reasoning and methodology.
         algorithm: str = None
     ) -> dict[str, Any]:
         """Train ML model on dataset."""
-        return {
-            "status": "success",
-            "model_type": model_type,
-            "algorithm": algorithm or "auto_selected",
-            "metrics": {
-                "accuracy": 0.85,
-                "precision": 0.83,
-                "recall": 0.87,
-                "f1_score": 0.85
-            },
-            "feature_importance": {
-                "feature_1": 0.35,
-                "feature_2": 0.28,
-                "feature_3": 0.22
-            },
-            "model_id": "model_abc123"
-        }
+        raise AgentException(
+            message="ML training is not available in P0. Use the modeling workflows (P2) once implemented."
+        )
     
     async def _create_visualization(
         self,
@@ -400,23 +469,10 @@ Always explain your reasoning and methodology.
         color_by: str = None
     ) -> dict[str, Any]:
         """Create data visualization."""
-        return {
-            "status": "success",
-            "viz_type": viz_type,
-            "config": {
-                "x": x_column,
-                "y": y_column,
-                "color": color_by
-            },
-            "chart_spec": {
-                "type": viz_type,
-                "data": "encoded_data_reference"
-            },
-            "insights": [
-                "Clear positive correlation visible",
-                "Two distinct clusters identified"
-            ]
-        }
+        raise AgentException(
+            message="Chart operators are not yet implemented in the safe compute layer. "
+            "Use table-based operators (EDA) for P0, or implement chart operators in P1."
+        )
     
     async def _generate_sql(
         self,
@@ -448,19 +504,17 @@ Always explain your reasoning and methodology.
         checks: list[str] = None
     ) -> dict[str, Any]:
         """Assess data quality."""
+        ds, compute, owner_id = self._require_compute(dataset_id)
+        plan = [
+            {"operator": "missingness_scan", "params": {}},
+            {"operator": "uniqueness_scan", "params": {"max_columns": 200}},
+            {"operator": "outlier_scan", "params": {"max_columns": 25}},
+        ]
+        results = await compute.run_plan(dataset_id=ds, plan=plan, owner_id=owner_id, sample_rows=200_000)
         return {
             "status": "success",
-            "overall_score": 0.85,
-            "checks": {
-                "completeness": {"score": 0.92, "missing_values": 234},
-                "uniqueness": {"score": 0.78, "duplicates": 45},
-                "validity": {"score": 0.95, "invalid_values": 12},
-                "consistency": {"score": 0.88, "inconsistencies": 23}
-            },
-            "recommendations": [
-                "Remove 45 duplicate rows",
-                "Investigate 234 missing values in critical columns"
-            ]
+            "dataset_id": str(ds),
+            "runs": [self._execution_result_to_dict(r) for r in results],
         }
 
 

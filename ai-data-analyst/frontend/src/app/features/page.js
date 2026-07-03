@@ -1,3 +1,6 @@
+'use client';
+
+import { useState, useRef, useEffect } from 'react';
 import Link from 'next/link';
 import {
     IconRobot, IconBrain, IconChart, IconLightning, IconSearch, IconTarget,
@@ -8,21 +11,14 @@ import {
 } from '@/components/icons';
 import styles from './page.module.css';
 
-export const metadata = {
-    title: 'Features - 244+ AI Analytics Capabilities',
-    description: 'Explore all 244+ features of NeuralAnalyst: AutoML, deep learning, statistical testing, forecasting, NLP, financial analytics, and more.',
-    openGraph: {
-        title: 'Features - 244+ AI Analytics Capabilities | NeuralAnalyst',
-        description: 'Complete feature list of the most comprehensive AI data analyst platform.',
-    },
-};
-
 const categories = [
     {
         id: 'data-ingestion',
-        title: 'Data Ingestion & Parsing',
-        description: 'Connect to any data source with intelligent parsing',
-        features: [
+        title: 'Data Ingestion',
+        subtitle: 'Connect to anything',
+        color: '#06b6d4',
+        count: 14,
+        highlights: [
             { title: 'CSV Auto-Parsing', desc: 'Automatic delimiter and encoding detection', Icon: IconUpload },
             { title: 'Excel Support', desc: 'Multi-sheet XLSX and legacy XLS files', Icon: IconFolder },
             { title: 'JSON/JSONL', desc: 'Nested JSON with automatic flattening', Icon: IconCode },
@@ -35,9 +31,11 @@ const categories = [
     },
     {
         id: 'data-cleaning',
-        title: 'Data Cleaning & Preprocessing',
-        description: 'Production-grade data quality and transformation',
-        features: [
+        title: 'Data Cleaning',
+        subtitle: 'Production-grade quality',
+        color: '#8b5cf6',
+        count: 18,
+        highlights: [
             { title: 'Missing Value Detection', desc: 'MCAR, MAR, MNAR pattern analysis', Icon: IconSearch },
             { title: 'Smart Imputation', desc: 'KNN, MICE, time-series, hot-deck', Icon: IconTarget },
             { title: 'Outlier Detection', desc: 'Z-score, IQR, Isolation Forest, LOF', Icon: IconAlert },
@@ -51,8 +49,10 @@ const categories = [
     {
         id: 'machine-learning',
         title: 'Machine Learning',
-        description: 'State-of-the-art algorithms with AutoML',
-        features: [
+        subtitle: 'State-of-the-art AutoML',
+        color: '#f59e0b',
+        count: 32,
+        highlights: [
             { title: 'AutoML Pipeline', desc: 'Automated model selection and tuning', Icon: IconRobot },
             { title: 'Random Forest', desc: 'Ensemble trees for classification/regression', Icon: IconNetwork },
             { title: 'XGBoost', desc: 'Gradient boosting with regularization', Icon: IconLightning },
@@ -66,8 +66,10 @@ const categories = [
     {
         id: 'statistical-analysis',
         title: 'Statistical Analysis',
-        description: 'Rigorous hypothesis testing and inference',
-        features: [
+        subtitle: 'Rigorous testing',
+        color: '#10b981',
+        count: 20,
+        highlights: [
             { title: 'A/B Testing', desc: 'Frequentist, Bayesian, sequential', Icon: IconFlask },
             { title: 'Hypothesis Testing', desc: 't-test, ANOVA, chi-square, Fisher', Icon: IconStats },
             { title: 'Correlation Analysis', desc: 'Pearson, Spearman, Kendall', Icon: IconNetwork },
@@ -80,9 +82,11 @@ const categories = [
     },
     {
         id: 'forecasting',
-        title: 'Time Series & Forecasting',
-        description: 'Predict the future with confidence intervals',
-        features: [
+        title: 'Time Series',
+        subtitle: 'Predict with confidence',
+        color: '#ec4899',
+        count: 16,
+        highlights: [
             { title: 'Prophet', desc: 'Facebook/Meta forecasting library', Icon: IconTime },
             { title: 'ARIMA/SARIMA', desc: 'Classical time series models', Icon: IconTrend },
             { title: 'Exponential Smoothing', desc: 'Holt-Winters methods', Icon: IconChart },
@@ -95,9 +99,11 @@ const categories = [
     },
     {
         id: 'nlp',
-        title: 'NLP & Text Analytics',
-        description: 'Extract insights from unstructured text',
-        features: [
+        title: 'NLP & Text',
+        subtitle: 'Understand language',
+        color: '#6366f1',
+        count: 14,
+        highlights: [
             { title: 'Sentiment Analysis', desc: 'Positive, negative, neutral detection', Icon: IconChat },
             { title: 'Named Entity Recognition', desc: 'Extract people, orgs, locations', Icon: IconDatabase },
             { title: 'Topic Modeling', desc: 'Discover hidden themes', Icon: IconText },
@@ -110,9 +116,11 @@ const categories = [
     },
     {
         id: 'financial',
-        title: 'Financial Analytics',
-        description: 'Portfolio analysis and risk management',
-        features: [
+        title: 'Financial',
+        subtitle: 'Risk & portfolio',
+        color: '#14b8a6',
+        count: 12,
+        highlights: [
             { title: 'Sharpe Ratio', desc: 'Risk-adjusted return measurement', Icon: IconTrend },
             { title: 'Sortino Ratio', desc: 'Downside risk-adjusted returns', Icon: IconChart },
             { title: 'Value at Risk', desc: 'VaR and Conditional VaR', Icon: IconAlert },
@@ -126,8 +134,10 @@ const categories = [
     {
         id: 'customer',
         title: 'Customer Analytics',
-        description: 'Understand and retain your customers',
-        features: [
+        subtitle: 'Understand & retain',
+        color: '#f97316',
+        count: 14,
+        highlights: [
             { title: 'RFM Analysis', desc: 'Recency, Frequency, Monetary segmentation', Icon: IconUsers },
             { title: 'Cohort Analysis', desc: 'Track user behavior over time', Icon: IconStats },
             { title: 'CLV Prediction', desc: 'Customer Lifetime Value modeling', Icon: IconMoney },
@@ -141,59 +151,127 @@ const categories = [
 ];
 
 export default function FeaturesPage() {
+    const [activeCategory, setActiveCategory] = useState(0);
+    const [isAnimating, setIsAnimating] = useState(false);
+    const gridRef = useRef(null);
+
+    const handleCategoryChange = (index) => {
+        if (index === activeCategory || isAnimating) return;
+        setIsAnimating(true);
+        setActiveCategory(index);
+        setTimeout(() => setIsAnimating(false), 400);
+    };
+
+    const category = categories[activeCategory];
+    const totalFeatures = categories.reduce((sum, c) => sum + c.count, 0);
+
     return (
         <main className={styles.main}>
             {/* Hero */}
             <section className={styles.hero}>
                 <div className={styles.heroGlow}></div>
                 <div className={styles.container}>
+                    <div className={styles.heroBadge}>
+                        <span className={styles.heroBadgeDot}></span>
+                        {totalFeatures}+ capabilities
+                    </div>
                     <h1 className={styles.heroTitle}>
-                        <span className={styles.gradient}>244+</span> Features
+                        Everything you need.<br />
+                        <span className={styles.gradient}>Nothing you don&apos;t.</span>
                     </h1>
                     <p className={styles.heroSubtitle}>
-                        The most comprehensive AI data analyst platform. Every feature you need,
-                        from basic EDA to advanced deep learning.
+                        From basic EDA to deep learning, from financial analytics
+                        to customer intelligence — all in one platform.
                     </p>
-                    <div className={styles.heroCta}>
-                        <Link href="/register" className={styles.primaryBtn}>
-                            Start Free Trial
-                            <IconArrowRight size={20} />
-                        </Link>
-                        <Link href="/pricing" className={styles.secondaryBtn}>
-                            View Pricing
-                        </Link>
+                </div>
+            </section>
+
+            {/* Category Tabs + Content */}
+            <section className={styles.tabSection}>
+                <div className={styles.container}>
+                    {/* Tab Navigation */}
+                    <div className={styles.tabNav}>
+                        {categories.map((cat, index) => (
+                            <button
+                                key={cat.id}
+                                className={`${styles.tab} ${index === activeCategory ? styles.tabActive : ''}`}
+                                onClick={() => handleCategoryChange(index)}
+                                style={index === activeCategory ? { '--tab-color': cat.color } : {}}
+                            >
+                                <span className={styles.tabTitle}>{cat.title}</span>
+                                <span className={styles.tabCount}>{cat.count}</span>
+                            </button>
+                        ))}
+                    </div>
+
+                    {/* Category Header */}
+                    <div className={styles.categoryHeader} key={category.id}>
+                        <div className={styles.categoryMeta}>
+                            <span
+                                className={styles.categoryDot}
+                                style={{ background: category.color }}
+                            ></span>
+                            <span className={styles.categorySubtitle}>{category.subtitle}</span>
+                        </div>
+                        <h2 className={styles.categoryTitle}>{category.title}</h2>
+                        <div className={styles.categoryCount}>
+                            <span className={styles.countNumber} style={{ color: category.color }}>
+                                {category.count}
+                            </span>
+                            <span className={styles.countLabel}>features</span>
+                        </div>
+                    </div>
+
+                    {/* Feature Grid */}
+                    <div
+                        ref={gridRef}
+                        className={`${styles.featureGrid} ${isAnimating ? styles.featureGridAnimating : ''}`}
+                    >
+                        {category.highlights.map((feature, index) => (
+                            <div
+                                key={`${category.id}-${index}`}
+                                className={styles.featureCard}
+                                style={{ animationDelay: `${index * 60}ms` }}
+                            >
+                                <div
+                                    className={styles.featureIcon}
+                                    style={{ '--icon-color': category.color }}
+                                >
+                                    <feature.Icon size={22} />
+                                </div>
+                                <div className={styles.featureContent}>
+                                    <h3 className={styles.featureTitle}>{feature.title}</h3>
+                                    <p className={styles.featureDesc}>{feature.desc}</p>
+                                </div>
+                            </div>
+                        ))}
                     </div>
                 </div>
             </section>
 
-            {/* Categories */}
-            {categories.map((category, categoryIndex) => (
-                <section
-                    key={category.id}
-                    className={`${styles.category} ${categoryIndex % 2 === 1 ? styles.categoryAlt : ''}`}
-                    id={category.id}
-                >
-                    <div className={styles.container}>
-                        <div className={styles.categoryHeader}>
-                            <h2 className={styles.categoryTitle}>{category.title}</h2>
-                            <p className={styles.categoryDesc}>{category.description}</p>
+            {/* Stats Bar */}
+            <section className={styles.statsBar}>
+                <div className={styles.container}>
+                    <div className={styles.statsGrid}>
+                        <div className={styles.stat}>
+                            <span className={styles.statValue}>{totalFeatures}+</span>
+                            <span className={styles.statLabel}>Total Features</span>
                         </div>
-                        <div className={styles.featureGrid}>
-                            {category.features.map((feature, index) => (
-                                <div key={index} className={styles.featureCard}>
-                                    <div className={styles.featureIcon}>
-                                        <feature.Icon size={24} />
-                                    </div>
-                                    <div className={styles.featureContent}>
-                                        <h3 className={styles.featureTitle}>{feature.title}</h3>
-                                        <p className={styles.featureDesc}>{feature.desc}</p>
-                                    </div>
-                                </div>
-                            ))}
+                        <div className={styles.stat}>
+                            <span className={styles.statValue}>34</span>
+                            <span className={styles.statLabel}>ML Modules</span>
+                        </div>
+                        <div className={styles.stat}>
+                            <span className={styles.statValue}>11</span>
+                            <span className={styles.statLabel}>AI Agents</span>
+                        </div>
+                        <div className={styles.stat}>
+                            <span className={styles.statValue}>86%</span>
+                            <span className={styles.statLabel}>Production Ready</span>
                         </div>
                     </div>
-                </section>
-            ))}
+                </div>
+            </section>
 
             {/* CTA */}
             <section className={styles.cta}>

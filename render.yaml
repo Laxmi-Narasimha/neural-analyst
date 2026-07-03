@@ -12,6 +12,8 @@ services:
         value: development
       - key: DEBUG
         value: "false"
+      - key: DB_MIGRATE_ON_STARTUP
+        value: "true"
       - key: DB_AUTO_CREATE_TABLES
         value: "true"
       - key: DATABASE_URL

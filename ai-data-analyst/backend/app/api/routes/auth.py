@@ -1,10 +1,11 @@
 # AI Enterprise Data Analyst - API Auth Routes
-# Authentication endpoints with JWT
+# Authentication endpoints with JWT + local auth mode
 
 from __future__ import annotations
 
 from typing import Any, Optional
 from datetime import datetime
+from uuid import UUID, uuid5, NAMESPACE_DNS
 
 from fastapi import APIRouter, Depends, HTTPException, status, Header
 from pydantic import BaseModel, EmailStr, Field
@@ -16,14 +17,19 @@ from app.services.auth_service import (
     get_auth_service,
     UserRole,
     Permission,
-    AuthUser
+    AuthUser,
+    ROLE_PERMISSIONS,
 )
+from app.core.config import get_settings, AuthMode
 from app.core.exceptions import AuthenticationException, AuthorizationException
 from app.core.logging import get_logger
 from app.services.database import get_db_session
 
 logger = get_logger(__name__)
 router = APIRouter()
+
+# Deterministic UUID for the local default user (always the same across restarts)
+_LOCAL_USER_ID = uuid5(NAMESPACE_DNS, "neural-analyst.local.user")
 
 
 # ============================================================================
@@ -80,6 +86,44 @@ class APIKeyResponse(BaseModel):
 
 
 # ============================================================================
+# Local Mode Helpers
+# ============================================================================
+
+async def _ensure_local_user_in_db(db: AsyncSession) -> UUID:
+    """Create the default local user in DB if it doesn't exist (for FK integrity)."""
+    from app.models import User
+
+    result = await db.execute(select(User).where(User.id == _LOCAL_USER_ID))
+    db_user = result.scalars().first()
+    if not db_user:
+        from app.services.auth_service import PasswordHasher
+        db_user = User(
+            id=_LOCAL_USER_ID,
+            email="local@neural-analyst.dev",
+            hashed_password=PasswordHasher.hash("local-dev-password"),
+            full_name="Local User",
+            is_active=True,
+            is_superuser=True,
+            is_verified=True,
+            settings={"role": "admin"},
+        )
+        db.add(db_user)
+        await db.commit()
+        logger.info("Created default local user for AUTH_MODE=local")
+    return _LOCAL_USER_ID
+
+
+def _get_local_auth_user() -> AuthUser:
+    """Return the fixed local admin user (no JWT needed)."""
+    return AuthUser(
+        user_id=_LOCAL_USER_ID,
+        email="local@neural-analyst.dev",
+        role=UserRole.ADMIN,
+        permissions=ROLE_PERMISSIONS[UserRole.ADMIN],
+    )
+
+
+# ============================================================================
 # Dependencies
 # ============================================================================
 
@@ -88,14 +132,22 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db_session),
     auth_service: AuthenticationService = Depends(get_auth_service)
 ) -> AuthUser:
-    """Extract and validate user from token."""
+    """Extract and validate user from token, or return local user in local mode."""
+    settings = get_settings()
+
+    # ---- LOCAL MODE: no auth required, return default admin user ----
+    if settings.auth_mode == AuthMode.LOCAL:
+        await _ensure_local_user_in_db(db)
+        return _get_local_auth_user()
+
+    # ---- JWT MODE: full authentication ----
     if not authorization:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authorization header required",
             headers={"WWW-Authenticate": "Bearer"}
         )
-    
+
     # Extract token
     parts = authorization.split()
     if len(parts) != 2 or parts[0].lower() != "bearer":
@@ -103,9 +155,9 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authorization header"
         )
-    
+
     token = parts[1]
-    
+
     try:
         user = auth_service.validate_token(token)
 
@@ -176,7 +228,7 @@ async def register(
     """Register a new user."""
     try:
         role = UserRole(request.role) if request.role else UserRole.ANALYST
-        
+
         result = await auth_service.register_user(
             db=db,
             email=request.email,
@@ -184,13 +236,13 @@ async def register(
             role=role,
             full_name=request.full_name,
         )
-        
+
         return {
             "status": "success",
             "message": "User registered successfully",
             "user": result
         }
-        
+
     except AuthenticationException as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -211,12 +263,12 @@ async def login(
             email=request.email,
             password=request.password
         )
-        
+
         return TokenResponse(
             access_token=tokens["access_token"],
             refresh_token=tokens["refresh_token"]
         )
-        
+
     except AuthenticationException as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -233,12 +285,12 @@ async def refresh_token(
     """Refresh access token."""
     try:
         tokens = await auth_service.refresh_tokens(db=db, refresh_token=request.refresh_token)
-        
+
         return TokenResponse(
             access_token=tokens["access_token"],
             refresh_token=tokens["refresh_token"]
         )
-        
+
     except AuthenticationException as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -277,13 +329,13 @@ async def create_api_key(
     permissions = None
     if request.permissions:
         permissions = [Permission(p) for p in request.permissions]
-    
+
     key_id, secret = auth_service.api_keys.generate_key(
         user_id=str(user.user_id),
         name=request.name,
         permissions=permissions
     )
-    
+
     return APIKeyResponse(
         key_id=key_id,
         secret=secret,

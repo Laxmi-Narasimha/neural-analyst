@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:15
@@ -17,6 +15,40 @@ services:
     ports:
       - "6379:6379"
 
+  analyst-backend:
+    build:
+      context: ./ai-data-analyst/backend
+    environment:
+      ENVIRONMENT: development
+      DEBUG: "true"
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/ai_data_analyst
+      DB_MIGRATE_ON_STARTUP: "true"
+      DB_AUTO_CREATE_TABLES: "true"
+      MAX_UPLOAD_SIZE_MB: "1024"
+      JOB_EXECUTOR: local
+      SECURITY_CORS_ORIGINS: '["http://localhost:3000"]'
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - analyst_uploads:/app/uploads
+      - analyst_artifacts:/app/artifacts
+
+  analyst-frontend:
+    build:
+      context: ./ai-data-analyst/frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000/api/v1
+    ports:
+      - "3000:3000"
+    depends_on:
+      - analyst-backend
+
 volumes:
   postgres_data:
-
+  analyst_uploads:
+  analyst_artifacts:

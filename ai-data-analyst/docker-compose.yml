@@ -1,0 +1,124 @@
+# Neural Analyst - Docker Compose
+# Usage:
+#   Local (SQLite, no Redis):    docker compose up
+#   Full (Postgres + Redis):     docker compose --profile full up
+#   Dev (Postgres, no worker):   docker compose --profile dev up
+#
+# Environment:
+#   Copy .env.example to .env and configure as needed.
+#   For local mode (default), no env vars are required.
+
+services:
+  # ==========================================================================
+  # Backend API (always runs)
+  # ==========================================================================
+  backend:
+    build: ./backend
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    env_file:
+      - .env
+    environment:
+      - DB_URL=${DB_URL:-sqlite+aiosqlite:///./dev.db}
+      - AUTH_MODE=${AUTH_MODE:-local}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4o-mini}
+      - JOB_EXECUTOR=${JOB_EXECUTOR:-local}
+      - OBJECT_STORE_BACKEND=${OBJECT_STORE_BACKEND:-local}
+      - VECTOR_STORE=${VECTOR_STORE:-none}
+    volumes:
+      - backend-data:/app/uploads
+      - backend-artifacts:/app/artifacts
+      - backend-models:/app/models
+      - backend-db:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Frontend (always runs)
+  # ==========================================================================
+  frontend:
+    build: ./frontend
+    ports:
+      - "${FRONTEND_PORT:-3002}:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://backend:8000/api/v1
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ==========================================================================
+  # PostgreSQL (full + dev profiles)
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["full", "dev"]
+    environment:
+      POSTGRES_DB: neural_analyst
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Redis (full + dev profiles)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    profiles: ["full", "dev"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ==========================================================================
+  # Celery Worker (full profile only)
+  # ==========================================================================
+  worker:
+    build: ./backend
+    profiles: ["full"]
+    command: celery -A app.worker worker --loglevel=info --concurrency=4
+    env_file:
+      - .env
+    environment:
+      - DB_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:5432/neural_analyst
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - JOB_EXECUTOR=celery
+    volumes:
+      - backend-data:/app/uploads
+      - backend-artifacts:/app/artifacts
+      - backend-models:/app/models
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  backend-data:
+  backend-artifacts:
+  backend-models:
+  backend-db:
+  postgres-data:
+  redis-data:

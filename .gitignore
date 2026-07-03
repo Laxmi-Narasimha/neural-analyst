@@ -41,6 +41,8 @@ build/
 # App runtime data
 uploads/
 artifacts/
+storage_cache/
+models/
 **/artifacts/
 *.sqlite
 *.db

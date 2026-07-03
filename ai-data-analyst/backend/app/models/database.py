@@ -77,6 +77,25 @@ class AnalysisStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
+class JobType(str, Enum):
+    """Types of background jobs executed by the platform."""
+
+    DATASET_PROCESSING = "dataset_processing"
+    DATASET_TRANSFORM = "dataset_transform"
+    COMPUTE_PLAN = "compute_plan"
+    DATASET_PURGE = "dataset_purge"
+
+
+class JobStatus(str, Enum):
+    """Status of a background job."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class ModelType(str, Enum):
     """Types of ML models."""
     CLASSIFICATION = "classification"
@@ -256,6 +275,11 @@ class User(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
         back_populates="owner",
         lazy="selectin"
     )
+    dataset_versions: Mapped[list["DatasetVersion"]] = relationship(
+        "DatasetVersion",
+        back_populates="owner",
+        lazy="selectin",
+    )
     analyses: Mapped[list["Analysis"]] = relationship(
         "Analysis",
         back_populates="owner",
@@ -268,6 +292,16 @@ class User(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     )
     adequacy_sessions: Mapped[list["DataAdequacySession"]] = relationship(
         "DataAdequacySession",
+        back_populates="owner",
+        lazy="selectin",
+    )
+    jobs: Mapped[list["Job"]] = relationship(
+        "Job",
+        back_populates="owner",
+        lazy="selectin",
+    )
+    connections: Mapped[list["ExternalConnection"]] = relationship(
+        "ExternalConnection",
         back_populates="owner",
         lazy="selectin",
     )
@@ -349,9 +383,68 @@ class Dataset(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
         back_populates="dataset",
         lazy="selectin"
     )
+    jobs: Mapped[list["Job"]] = relationship(
+        "Job",
+        back_populates="dataset",
+        lazy="selectin",
+    )
+    versions: Mapped[list["DatasetVersion"]] = relationship(
+        "DatasetVersion",
+        back_populates="dataset",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
     
     def __repr__(self) -> str:
         return f"<Dataset(id={self.id}, name='{self.name}', status={self.status.value})>"
+
+
+class DatasetVersion(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
+    """Immutable snapshot of a dataset asset + its derived metadata (versioned)."""
+
+    __tablename__ = "dataset_versions"
+    __table_args__ = (
+        UniqueConstraint("dataset_id", "version_hash", name="uq_dataset_versions_dataset_hash"),
+        Index("ix_dataset_versions_owner_created", "owner_id", "created_at"),
+        Index("ix_dataset_versions_dataset_created", "dataset_id", "created_at"),
+        Index("ix_dataset_versions_dataset_hash", "dataset_id", "version_hash"),
+    )
+
+    version_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    label: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    parent_version_hash: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    transform_spec: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+
+    file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    file_format: Mapped[str] = mapped_column(String(50), nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    row_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    column_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    schema_info: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    quality_report: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    profile_report: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+
+    owner_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner: Mapped["User"] = relationship("User", back_populates="dataset_versions")
+
+    dataset_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("datasets.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    dataset: Mapped["Dataset"] = relationship("Dataset", back_populates="versions")
+
+    def __repr__(self) -> str:
+        return f"<DatasetVersion(id={self.id}, dataset_id={self.dataset_id}, hash={self.version_hash[:8]}...)>"
 
 
 class DatasetColumn(Base, UUIDMixin, TimestampMixin):
@@ -481,6 +574,56 @@ class Analysis(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
     
     def __repr__(self) -> str:
         return f"<Analysis(id={self.id}, name='{self.name}', status={self.status.value})>"
+
+
+class Job(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
+    """Generic background job record (dataset processing, async compute, etc)."""
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        Index("ix_jobs_owner_status", "owner_id", "status"),
+        Index("ix_jobs_owner_type", "owner_id", "job_type"),
+        Index("ix_jobs_dataset_type", "dataset_id", "job_type"),
+        Index("ix_jobs_created", "created_at"),
+    )
+
+    job_type: Mapped[JobType] = mapped_column(SQLEnum(JobType), nullable=False, index=True)
+    status: Mapped[JobStatus] = mapped_column(
+        SQLEnum(JobStatus),
+        default=JobStatus.QUEUED,
+        nullable=False,
+        index=True,
+    )
+    progress: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    status_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error_traceback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    owner_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner: Mapped["User"] = relationship("User", back_populates="jobs")
+
+    dataset_id: Mapped[Optional[UUID]] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("datasets.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    dataset: Mapped[Optional["Dataset"]] = relationship("Dataset", back_populates="jobs")
+
+    def __repr__(self) -> str:
+        return f"<Job(id={self.id}, type={self.job_type.value}, status={self.status.value})>"
 
 
 class MLModel(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
@@ -616,6 +759,14 @@ class Artifact(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
         Index("ix_artifacts_owner_created", "owner_id", "created_at"),
         Index("ix_artifacts_dataset_created", "dataset_id", "created_at"),
         Index("ix_artifacts_type_created", "artifact_type", "created_at"),
+        Index(
+            "ix_artifacts_owner_op_cache",
+            "owner_id",
+            "dataset_id",
+            "dataset_version",
+            "operator_name",
+            "operator_params_hash",
+        ),
     )
 
     artifact_type: Mapped[ArtifactType] = mapped_column(SQLEnum(ArtifactType), nullable=False, index=True)
@@ -628,6 +779,7 @@ class Artifact(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
     dataset_version: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     operator_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     operator_params: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+    operator_params_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
 
     owner_id: Mapped[UUID] = mapped_column(
         UUID_TYPE,
@@ -647,6 +799,43 @@ class Artifact(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
 
     def __repr__(self) -> str:
         return f"<Artifact(id={self.id}, type={self.artifact_type.value}, name='{self.name}')>"
+
+
+class ArtifactShare(Base, UUIDMixin, TimestampMixin):
+    """Share link for an artifact (read-only; token-based; revocable)."""
+
+    __tablename__ = "artifact_shares"
+    __table_args__ = (
+        Index("ix_artifact_shares_token_hash", "token_hash", unique=True),
+        Index("ix_artifact_shares_owner_created", "owner_id", "created_at"),
+    )
+
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+    artifact_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("artifacts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    artifact: Mapped["Artifact"] = relationship("Artifact", lazy="selectin")
+
+    owner_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner: Mapped["User"] = relationship("User", lazy="selectin")
+
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    access_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_accessed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<ArtifactShare(id={self.id}, artifact_id={self.artifact_id})>"
 
 
 class DataAdequacySession(Base, TimestampMixin, SoftDeleteMixin):
@@ -687,6 +876,42 @@ class DataAdequacySession(Base, TimestampMixin, SoftDeleteMixin):
 
     def __repr__(self) -> str:
         return f"<DataAdequacySession(session_id={self.session_id}, status={self.status.value})>"
+
+
+class ExternalConnection(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin, AuditMixin):
+    """External data source connection (secrets encrypted at rest)."""
+
+    __tablename__ = "external_connections"
+    __table_args__ = (
+        UniqueConstraint("owner_id", "name", name="uq_external_connections_owner_name"),
+        Index("ix_external_connections_owner_created", "owner_id", "created_at"),
+    )
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    connector_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+
+    host: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    port: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    database: Mapped[str] = mapped_column(String(255), nullable=False)
+    username: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+
+    encrypted_password: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ssl: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    extra: Mapped[dict[str, Any]] = mapped_column(JSON_TYPE, default=dict, nullable=False)
+
+    status: Mapped[str] = mapped_column(String(50), default="created", nullable=False, index=True)
+    last_tested: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    owner_id: Mapped[UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    owner: Mapped["User"] = relationship("User", back_populates="connections")
+
+    def __repr__(self) -> str:
+        return f"<ExternalConnection(id={self.id}, type={self.connector_type}, name='{self.name}')>"
 
 
 # ============================================================================

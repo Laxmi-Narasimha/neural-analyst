@@ -251,33 +251,131 @@ function VisualContent({ type }) {
                 </div>
             );
         case 'security':
-            return (
-                <div className={styles.securityPreview}>
-                    <div className={styles.securityRow}>
-                        <span className={styles.securityLabel}>Encryption</span>
-                        <span className={styles.securityValue}>AES-256</span>
-                    </div>
-                    <div className={styles.securityRow}>
-                        <span className={styles.securityLabel}>API Keys</span>
-                        <span className={styles.securityValue}>Your Own</span>
-                    </div>
-                    <div className={styles.securityRow}>
-                        <span className={styles.securityLabel}>Data Storage</span>
-                        <span className={styles.securityValue}>Client-side</span>
-                    </div>
-                    <div className={styles.securityRow}>
-                        <span className={styles.securityLabel}>Compliance</span>
-                        <span className={styles.securityValue}>SOC 2, GDPR</span>
-                    </div>
-                    <div className={styles.securityShield}>
-                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                            <path d="M9 12l2 2 4-4" />
-                        </svg>
-                    </div>
-                </div>
-            );
+            return <SecurityAsciiVisual />;
         default:
             return null;
     }
+}
+
+function SecurityAsciiVisual() {
+    const [frame, setFrame] = useState(0);
+
+    useEffect(() => {
+        const interval = setInterval(() => {
+            setFrame(f => f + 1);
+        }, 150);
+        return () => clearInterval(interval);
+    }, []);
+
+    const matrixChars = '01アイウエオカキクケコサシスセソ█▓▒░╔╗╚╝║═';
+    const getChar = (seed) => matrixChars[Math.abs((seed + frame) * 7 + seed * 13) % matrixChars.length];
+
+    // Generate matrix rain columns
+    const cols = 36;
+    const rows = 14;
+    const shield = [
+        '         ╔══════════╗         ',
+        '        ╔╝ ░░░░░░░░ ╚╗        ',
+        '       ╔╝ ░ AES-256 ░ ╚╗       ',
+        '       ║  ░░░░░░░░░░  ║       ',
+        '       ║   ┌──────┐   ║       ',
+        '       ║   │ ✓ OK │   ║       ',
+        '       ║   └──────┘   ║       ',
+        '       ║  ENCRYPTED   ║       ',
+        '       ╚╗            ╔╝       ',
+        '        ╚╗  SECURE  ╔╝        ',
+        '         ╚╗        ╔╝         ',
+        '          ╚╗      ╔╝          ',
+        '           ╚══════╝           ',
+    ];
+
+    const labels = [
+        { text: 'BYOK', x: 1, y: 1 },
+        { text: 'E2E-ENC', x: 24, y: 2 },
+        { text: 'SOC-2', x: 2, y: 11 },
+        { text: 'RBAC', x: 26, y: 10 },
+        { text: 'AUDIT', x: 0, y: 6 },
+        { text: 'ZERO-TRUST', x: 22, y: 6 },
+    ];
+
+    const renderGrid = () => {
+        const lines = [];
+        const shieldStartRow = 1;
+        const shieldStartCol = Math.floor((cols - 30) / 2);
+
+        for (let r = 0; r < rows; r++) {
+            let line = '';
+            for (let c = 0; c < cols; c++) {
+                const shieldRow = r - shieldStartRow;
+                const shieldCol = c - shieldStartCol;
+
+                // Check if we're inside the shield area
+                if (shieldRow >= 0 && shieldRow < shield.length && shieldCol >= 0 && shieldCol < 30) {
+                    const ch = shield[shieldRow][shieldCol];
+                    if (ch && ch !== ' ') {
+                        line += ch;
+                        continue;
+                    }
+                }
+
+                // Check labels
+                let isLabel = false;
+                for (const label of labels) {
+                    if (r === label.y && c >= label.x && c < label.x + label.text.length) {
+                        line += label.text[c - label.x];
+                        isLabel = true;
+                        break;
+                    }
+                }
+                if (isLabel) continue;
+
+                // Matrix rain - different speeds per column
+                const speed = ((c * 7 + 3) % 5) + 1;
+                const phase = (frame * speed + c * 11 + r * 3) % 20;
+                if (phase < 3) {
+                    line += getChar(c * rows + r);
+                } else if (phase < 5) {
+                    line += '·';
+                } else {
+                    line += ' ';
+                }
+            }
+            lines.push(line);
+        }
+        return lines;
+    };
+
+    const gridLines = renderGrid();
+
+    // Scanning line position
+    const scanY = frame % (rows + 4);
+
+    return (
+        <div className={styles.asciiSecurity}>
+            <pre className={styles.asciiGrid}>
+                {gridLines.map((line, i) => {
+                    const isScanLine = i === scanY || i === scanY - 1;
+                    const isShieldLine = i >= 1 && i <= 13;
+                    return (
+                        <div
+                            key={i}
+                            className={`${styles.asciiLine} ${isScanLine ? styles.asciiScanLine : ''}`}
+                            style={{
+                                color: isShieldLine
+                                    ? 'rgba(80, 250, 123, 0.85)'
+                                    : `rgba(80, 250, 123, ${0.15 + Math.sin((frame + i) * 0.3) * 0.1})`,
+                            }}
+                        >
+                            {line}
+                        </div>
+                    );
+                })}
+            </pre>
+            <div className={styles.asciiOverlay}>
+                <span className={styles.asciiStatus}>
+                    ● PROTECTED
+                </span>
+            </div>
+        </div>
+    );
 }

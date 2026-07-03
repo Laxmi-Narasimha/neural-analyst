@@ -10,6 +10,7 @@ from app.compute.artifacts import ArtifactRef
 from app.core.logging import LogContext, get_logger
 from app.core.serialization import to_jsonable
 from app.models import Artifact, ArtifactType
+from app.utils.hashing import hash_json
 
 logger = get_logger(__name__)
 
@@ -45,6 +46,7 @@ class ArtifactIndexService:
                     dataset_version=ref.dataset_version,
                     operator_name=ref.operator_name,
                     operator_params=to_jsonable(ref.operator_params or {}),
+                    operator_params_hash=hash_json(to_jsonable(ref.operator_params or {})),
                     created_by=owner_id,
                     updated_by=owner_id,
                 )
@@ -58,4 +60,3 @@ class ArtifactIndexService:
         except Exception as e:
             await self._session.rollback()
             logger.warning("Artifact indexing failed", context=context, error=str(e), exc_info=True)
-

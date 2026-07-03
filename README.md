@@ -40,6 +40,35 @@ App UI: `http://localhost:3000`
 - `scripts/setup_analyst.ps1` (installs deps)
 - `scripts/dev_analyst.ps1` (starts backend + frontend)
 
+### Optional: Docker (one command self-host)
+
+If you have Docker Desktop running:
+
+```powershell
+cd neural-analyst
+docker compose up --build
+```
+
+- The backend runs Alembic migrations on startup (idempotent).
+- UI: `http://localhost:3000`
+- API docs: `http://localhost:8000/docs`
+
+To run background jobs out-of-process (Celery worker + Redis), use:
+
+```powershell
+cd neural-analyst
+docker compose -f docker-compose.yml -f docker-compose.celery.yml up --build
+```
+
+Convenience:
+- `scripts/self_host.ps1` (PowerShell) supports `-Celery`, `-Minio`, and `-Detach`.
+
+Object storage (optional):
+- Set `OBJECT_STORE_BACKEND=s3` + `OBJECT_STORE_S3_BUCKET=...` to store uploads/artifacts in S3-compatible storage (recommended for multi-instance deployments).
+- For local S3-compatible testing, use MinIO:
+  - `docker compose -f docker-compose.yml -f docker-compose.minio.yml up --build`
+  - (Celery + MinIO) `docker compose -f docker-compose.yml -f docker-compose.celery.yml -f docker-compose.minio.yml up --build`
+
 ## Docs
 
 - `docs/PROJECT_MAP.md`: folder map.
@@ -48,4 +77,5 @@ App UI: `http://localhost:3000`
 - `docs/GITHUB_WORKFLOW.md`: how to commit/push/PR safely (with explanations).
 - `docs/ROADMAP.md`: build sequence aligned to `spec_review/*`.
 - `docs/SETUP.md`: setup runbook (Windows + macOS).
+- `docs/LEVELS_AND_SEQUENCE.md`: "low/medium/expert/core" capability ladder + sequential build rule.
 - `spec_review/TALK_TO_YOUR_DATA_MASTER_SPEC.md`: spec pack entry point (product + engineering + security).

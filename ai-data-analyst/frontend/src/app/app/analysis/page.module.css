@@ -1,4 +1,4 @@
-.main {
+.page {
     padding: 32px;
 }
 
@@ -45,6 +45,73 @@
     color: #fff;
 }
 
+/* Filters */
+.filters {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.tabs {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.tab {
+    appearance: none;
+    border: 1px solid rgba(17, 24, 39, 0.08);
+    background: rgba(255, 255, 255, 0.7);
+    color: #111827;
+    padding: 8px 12px;
+    border-radius: 999px;
+    font-size: 0.813rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.tab:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 20px -10px rgba(17, 24, 39, 0.25);
+}
+
+.active {
+    background: linear-gradient(135deg, rgba(139, 92, 246, 0.18), rgba(6, 182, 212, 0.14));
+    border-color: rgba(139, 92, 246, 0.25);
+}
+
+.searchWrapper {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.7);
+    border: 1px solid rgba(17, 24, 39, 0.08);
+    min-width: min(460px, 100%);
+}
+
+.searchIcon {
+    color: #9ca3af;
+}
+
+.searchInput {
+    width: 100%;
+    border: none;
+    outline: none;
+    background: transparent;
+    font-size: 0.875rem;
+    color: #111827;
+}
+
+.searchInput::placeholder {
+    color: #9ca3af;
+}
+
 /* Analysis List */
 .analysisList {
     display: flex;
@@ -61,6 +128,7 @@
     border-radius: 20px;
     transition: all 0.3s ease;
     cursor: pointer;
+    text-decoration: none;
 }
 
 .analysisCard:hover {
@@ -98,6 +166,30 @@
     gap: 16px;
     font-size: 0.813rem;
     color: #9ca3af;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.metaSep {
+    opacity: 0.7;
+}
+
+.statusMessage {
+    color: #6b7280;
+}
+
+.right {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.analysisTime {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.813rem;
+    color: #9ca3af;
 }
 
 .analysisStatus {
@@ -105,6 +197,7 @@
     font-size: 0.75rem;
     font-weight: 600;
     border-radius: 50px;
+    text-transform: lowercase;
 }
 
 .analysisStatus.completed {
@@ -117,9 +210,30 @@
     color: #06b6d4;
 }
 
-.analysisStatus.pending {
+.analysisStatus.queued {
     background: rgba(251, 146, 60, 0.1);
     color: #f97316;
+}
+
+.analysisStatus.failed {
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+}
+
+.analysisStatus.cancelled {
+    background: rgba(107, 114, 128, 0.18);
+    color: #6b7280;
+}
+
+.analysisAction {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 12px;
+    color: #111827;
+    background: rgba(17, 24, 39, 0.04);
 }
 
 /* Empty State */
@@ -151,4 +265,44 @@
     font-size: 0.938rem;
     color: #6b7280;
     margin-bottom: 24px;
+}
+
+/* Error / Loading */
+.error {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    background: rgba(239, 68, 68, 0.08);
+    color: #991b1b;
+    margin: 10px 0 16px;
+}
+
+.retry {
+    margin-left: auto;
+    border: 1px solid rgba(153, 27, 27, 0.25);
+    background: rgba(255, 255, 255, 0.7);
+    color: #991b1b;
+    padding: 6px 10px;
+    border-radius: 10px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.loading {
+    padding: 40px 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #6b7280;
+}
+
+.spinning {
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
 }

@@ -19,7 +19,8 @@ from app.core.exceptions import (
 )
 from app.core.logging import LogContext, get_logger
 from app.models import Dataset, DatasetStatus
-from app.services.data_ingestion import DataIngestionService
+from app.services.data_ingestion import DataIngestionService, FileFormat
+from app.services.object_store import get_object_store
 
 logger = get_logger(__name__)
 
@@ -112,9 +113,18 @@ class DatasetLoaderService:
     ) -> LoadedDataset:
         context = LogContext(component="DatasetLoaderService", operation="load_dataset")
 
-        file_path = Path(dataset.file_path)
-        if not file_path.exists():
-            raise FileNotFoundException(str(file_path))
+        storage_path = str(dataset.file_path or "").strip()
+        if not storage_path:
+            raise FileNotFoundException("dataset file_path is empty")
+
+        obj = get_object_store()
+        local_path = obj.ensure_local_path(
+            storage_path,
+            expected_size_bytes=int(getattr(dataset, "file_size_bytes", 0) or 0) or None,
+            filename_hint=str(getattr(dataset, "original_filename", "") or None),
+        )
+        if not local_path.exists():
+            raise FileNotFoundException(str(local_path))
 
         if max_rows is not None and sample_rows is None and dataset.row_count is not None:
             if int(dataset.row_count) > int(max_rows):
@@ -123,14 +133,37 @@ class DatasetLoaderService:
                     "Use sampling or run as an async job."
                 )
 
+        version_hint = ""
+        try:
+            pr = dataset.profile_report if isinstance(getattr(dataset, "profile_report", None), dict) else {}
+            vh = pr.get("file_hash") if isinstance(pr, dict) else None
+            if isinstance(vh, str) and vh.strip():
+                version_hint = vh.strip()
+        except Exception:
+            version_hint = ""
+
         def _load_sync() -> tuple[pd.DataFrame, str]:
-            with file_path.open("rb") as f:
-                version_hash = _sha256_fileobj(f)
+            with local_path.open("rb") as f:
+                # Avoid re-hashing large files on every load. Prefer the persisted version_hash
+                # from dataset processing when available.
+                version_hash = version_hint or _sha256_fileobj(f)
+                ff: FileFormat | None
+                try:
+                    ff = FileFormat(str(dataset.file_format or "").lower())
+                except Exception:
+                    ff = None
                 parse_opts: dict[str, Any] = {}
                 if sample_rows is not None:
                     # Best-effort sampling at read time for formats that support it.
                     parse_opts["nrows"] = int(sample_rows)
-                df = self._ingestion.parse_file(f, dataset.original_filename, **parse_opts)
+                try:
+                    df = self._ingestion.parse_file(f, dataset.original_filename, file_format=ff, **parse_opts)
+                except TypeError:
+                    # Some parsers (e.g., parquet) don't support nrows; fall back to slicing after load.
+                    f.seek(0)
+                    df = self._ingestion.parse_file(f, dataset.original_filename, file_format=ff)
+                    if sample_rows is not None:
+                        df = df.head(int(sample_rows))
                 return df, version_hash
 
         try:
@@ -156,7 +189,7 @@ class DatasetLoaderService:
             dataset_id=dataset.id,
             dataset_name=dataset.name,
             version_hash=version_hash,
-            file_path=str(file_path),
+            file_path=str(local_path),
             file_format=dataset.file_format,
             df=df,
             profile_report=dataset.profile_report or {},

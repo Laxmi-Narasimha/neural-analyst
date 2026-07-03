@@ -352,6 +352,31 @@ class ParquetParser(BaseFileParser):
     ) -> pd.DataFrame:
         """Parse Parquet file."""
         try:
+            # Pandas doesn't support nrows for parquet. For safe sampling on large files, allow a
+            # best-effort `nrows` option that reads only the first row groups via pyarrow.
+            nrows = options.pop("nrows", None)
+            if nrows is not None:
+                import pyarrow as pa
+                import pyarrow.parquet as pq
+
+                cols = options.get("columns")
+                pf = pq.ParquetFile(file_data)
+                remaining = max(0, int(nrows))
+                tables: list[pa.Table] = []
+                for i in range(int(pf.num_row_groups)):
+                    if remaining <= 0:
+                        break
+                    rg = pf.read_row_group(i, columns=cols)
+                    if int(rg.num_rows) > remaining:
+                        rg = rg.slice(0, remaining)
+                    tables.append(rg)
+                    remaining -= int(rg.num_rows)
+
+                if not tables:
+                    return pd.DataFrame()
+                table = tables[0] if len(tables) == 1 else pa.concat_tables(tables)
+                return table.to_pandas()
+
             df = pd.read_parquet(file_data, **options)
             return df
         except Exception as e:

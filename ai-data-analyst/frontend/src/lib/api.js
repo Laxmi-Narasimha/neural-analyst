@@ -117,6 +117,65 @@ class APIClient {
         return this._unwrapApiResponse(response);
     }
 
+    async listDatasetVersions(datasetId, page = 1, pageSize = 50) {
+        const params = new URLSearchParams({ page, page_size: pageSize });
+        const response = await this.request(`/datasets/${datasetId}/versions?${params}`);
+        return this._normalizeListResponse(response);
+    }
+
+    async suggestDatasetTransform(datasetId, { maxSteps = 8, includeDropColumns = true, includeStringNormalization = true } = {}) {
+        const response = await this.request(`/datasets/${datasetId}/transform/suggest`, {
+            method: 'POST',
+            body: JSON.stringify({
+                max_steps: Number(maxSteps),
+                include_drop_columns: Boolean(includeDropColumns),
+                include_string_normalization: Boolean(includeStringNormalization),
+            }),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
+    async previewDatasetTransform(datasetId, steps, sampleRows = 50_000, previewRows = 25) {
+        const response = await this.request(`/datasets/${datasetId}/transform/preview`, {
+            method: 'POST',
+            body: JSON.stringify({
+                steps: Array.isArray(steps) ? steps : [],
+                sample_rows: sampleRows,
+                preview_rows: previewRows,
+            }),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
+    async applyDatasetTransform(datasetId, steps, { label = null, setAsCurrent = true } = {}) {
+        const response = await this.request(`/datasets/${datasetId}/transform/apply`, {
+            method: 'POST',
+            body: JSON.stringify({
+                steps: Array.isArray(steps) ? steps : [],
+                label,
+                set_as_current: Boolean(setAsCurrent),
+            }),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
+    async activateDatasetVersion(datasetId, versionId) {
+        const response = await this.request(`/datasets/${datasetId}/versions/${versionId}/activate`, { method: 'POST' });
+        return this._unwrapApiResponse(response);
+    }
+
+    async queryDatasetSql(datasetId, query, { maxRows = null, timeoutSeconds = null } = {}) {
+        const q = String(query || '').trim();
+        const body = { query: q };
+        if (maxRows != null && Number.isFinite(Number(maxRows))) body.max_rows = Number(maxRows);
+        if (timeoutSeconds != null && Number.isFinite(Number(timeoutSeconds))) body.timeout_seconds = Number(timeoutSeconds);
+        const response = await this.request(`/datasets/${datasetId}/query`, {
+            method: 'POST',
+            body: JSON.stringify(body),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
     // ============================================================================
     // Chat / Analysis APIs
     // ============================================================================
@@ -197,10 +256,14 @@ class APIClient {
         });
     }
 
-    async importFromConnection(connectionId, tableName, datasetName) {
+    async listConnectionTables(connectionId) {
+        return this.request(`/connections/${connectionId}/tables`);
+    }
+
+    async importFromConnection(connectionId, tableName, datasetName, options = {}) {
         return this.request(`/connections/${connectionId}/import`, {
             method: 'POST',
-            body: JSON.stringify({ table_name: tableName, dataset_name: datasetName }),
+            body: JSON.stringify({ table_name: tableName, dataset_name: datasetName, ...options }),
         });
     }
 
@@ -237,12 +300,13 @@ class APIClient {
     // Data Speaks / Artifacts
     // ============================================================================
 
-    async runDataSpeaks(datasetId, plan = null) {
+    async runDataSpeaks(datasetId, plan = null, sampleRows = null) {
         const response = await this.request('/data-speaks/run', {
             method: 'POST',
             body: JSON.stringify({
                 dataset_id: datasetId,
                 plan,
+                sample_rows: sampleRows,
             }),
         });
         return this._unwrapApiResponse(response);
@@ -295,6 +359,259 @@ class APIClient {
 
     async getAnalysis(analysisId) {
         const response = await this.request(`/analyses/${analysisId}`);
+        return this._unwrapApiResponse(response);
+    }
+
+    streamAnalysisEvents(
+        analysisId,
+        { onMeta = null, onStep = null, onDone = null, onError = null, signal: externalSignal = null } = {}
+    ) {
+        const controller = externalSignal ? null : new AbortController();
+        const signal = externalSignal || controller.signal;
+
+        const token = getAccessToken();
+        const url = `${this.baseUrl}/analyses/${analysisId}/events`;
+
+        const run = async () => {
+            let sawDone = false;
+            const res = await fetch(url, {
+                method: 'GET',
+                headers: {
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                    Accept: 'text/event-stream',
+                },
+                signal,
+            });
+
+            if (!res.ok) {
+                if (res.status === 401) clearTokens();
+                const text = await res.text().catch(() => '');
+                throw new Error(text || `HTTP ${res.status}`);
+            }
+
+            if (!res.body || typeof res.body.getReader !== 'function') {
+                throw new Error('Streaming not supported by this browser');
+            }
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            const flush = () => {
+                const normalized = buffer.replace(/\r\n/g, '\n');
+                const parts = normalized.split('\n\n');
+                buffer = parts.pop() || '';
+                for (const part of parts) {
+                    const lines = part.split('\n');
+                    let eventName = 'message';
+                    const dataLines = [];
+                    for (const line of lines) {
+                        if (!line) continue;
+                        if (line.startsWith(':')) continue;
+                        if (line.startsWith('event:')) {
+                            eventName = line.slice('event:'.length).trim() || 'message';
+                            continue;
+                        }
+                        if (line.startsWith('data:')) {
+                            dataLines.push(line.slice('data:'.length).trimStart());
+                        }
+                    }
+
+                    if (dataLines.length === 0) continue;
+                    const dataRaw = dataLines.join('\n');
+                    let data = null;
+                    try {
+                        data = JSON.parse(dataRaw);
+                    } catch {
+                        data = dataRaw;
+                    }
+
+                    if (eventName === 'analysis_meta') onMeta && onMeta(data);
+                    else if (eventName === 'analysis_step') onStep && onStep(data);
+                    else if (eventName === 'analysis_done') {
+                        sawDone = true;
+                        onDone && onDone(data);
+                    }
+                }
+            };
+
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    flush();
+                }
+
+                buffer += decoder.decode();
+                flush();
+
+                if (!signal?.aborted && !sawDone) {
+                    throw new Error('Analysis event stream closed before completion');
+                }
+            } finally {
+                try {
+                    reader.releaseLock();
+                } catch {
+                    // ignore
+                }
+            }
+        };
+
+        run().catch((err) => {
+            if (signal?.aborted) return;
+            onError && onError(err);
+        });
+
+        return () => {
+            try {
+                controller && controller.abort();
+            } catch {
+                // ignore
+            }
+        };
+    }
+
+    async cancelAnalysis(analysisId) {
+        const response = await this.request(`/analyses/${analysisId}/cancel`, { method: 'POST' });
+        return this._unwrapApiResponse(response);
+    }
+
+    async exportAnalysisReport(analysisId, format = 'markdown') {
+        const params = new URLSearchParams({ format });
+        const response = await this.request(`/analyses/${analysisId}/export?${params}`, { method: 'POST' });
+        return this._unwrapApiResponse(response);
+    }
+
+    async listAnalysisActions(analysisId) {
+        const response = await this.request(`/analyses/${analysisId}/actions`);
+        return this._unwrapApiResponse(response);
+    }
+
+    async runAnalysisAction(analysisId, actionId, params = {}) {
+        const response = await this.request(`/analyses/${analysisId}/actions/run`, {
+            method: 'POST',
+            body: JSON.stringify({
+                action_id: actionId,
+                params: params && typeof params === 'object' ? params : {},
+            }),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
+    // ============================================================================
+    // Artifacts / Reports
+    // ============================================================================
+
+    async listArtifacts(page = 1, pageSize = 20, filters = {}) {
+        const params = new URLSearchParams({ page, page_size: pageSize });
+        if (filters.type) params.append('type', filters.type);
+        if (filters.dataset_id) params.append('dataset_id', filters.dataset_id);
+        if (filters.operator_name) params.append('operator_name', filters.operator_name);
+        const response = await this.request(`/artifacts?${params}`);
+        return this._normalizeListResponse(response);
+    }
+
+    async getArtifact(artifactId) {
+        const response = await this.request(`/artifacts/${artifactId}`);
+        return this._unwrapApiResponse(response);
+    }
+
+    async getArtifactRows(artifactId, offset = 0, limit = 50) {
+        const params = new URLSearchParams({
+            offset: String(offset),
+            limit: String(limit),
+        });
+        const response = await this.request(`/artifacts/${artifactId}/rows?${params}`);
+        return this._unwrapApiResponse(response);
+    }
+
+    async createReportShare(artifactId, expiresDays = null) {
+        const body = {};
+        if (expiresDays != null) body.expires_days = expiresDays;
+        const response = await this.request(`/shares/reports/${artifactId}`, {
+            method: 'POST',
+            body: JSON.stringify(body),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
+    async getSharedReport(shareToken) {
+        const token = encodeURIComponent(String(shareToken || ''));
+        const response = await this.request(`/public/reports/${token}`);
+        return this._unwrapApiResponse(response);
+    }
+
+    // ============================================================================
+    // Dashboard
+    // ============================================================================
+
+    async getDashboardSummary() {
+        const response = await this.request('/dashboard/summary');
+        return this._unwrapApiResponse(response);
+    }
+
+    // ============================================================================
+    // Data Quality / Adequacy
+    // ============================================================================
+
+    async startQualityValidation(goal, domain = 'general', datasetId = null) {
+        const response = await this.request('/quality/validate', {
+            method: 'POST',
+            body: JSON.stringify({
+                goal,
+                domain,
+                dataset_id: datasetId,
+            }),
+        });
+        return response;
+    }
+
+    async continueQualityValidation(sessionId, answers) {
+        const response = await this.request('/quality/continue', {
+            method: 'POST',
+            body: JSON.stringify({
+                session_id: sessionId,
+                answers,
+            }),
+        });
+        return response;
+    }
+
+    async getQualityStatus(sessionId) {
+        return this.request(`/quality/status/${sessionId}`);
+    }
+
+    async listQualityDomains() {
+        return this.request('/quality/domains');
+    }
+
+    async getLatestQualitySession(datasetId) {
+        const params = new URLSearchParams({ dataset_id: datasetId });
+        const response = await this.request(`/quality/sessions/latest?${params}`);
+        return this._unwrapApiResponse(response);
+    }
+
+    // ============================================================================
+    // Jobs
+    // ============================================================================
+
+    async listJobs(page = 1, pageSize = 50, filters = {}) {
+        const params = new URLSearchParams({ page, page_size: pageSize });
+        if (filters.status) params.append('status', filters.status);
+        if (filters.job_type) params.append('job_type', filters.job_type);
+        if (filters.dataset_id) params.append('dataset_id', filters.dataset_id);
+        const response = await this.request(`/jobs?${params}`);
+        return this._normalizeListResponse(response);
+    }
+
+    async getJob(jobId) {
+        const response = await this.request(`/jobs/${jobId}`);
+        return this._unwrapApiResponse(response);
+    }
+
+    async cancelJob(jobId) {
+        const response = await this.request(`/jobs/${jobId}/cancel`, { method: 'POST' });
         return this._unwrapApiResponse(response);
     }
 

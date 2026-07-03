@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { IconArrowRight, IconUpload, IconSparkles, IconChart, IconDatabase, IconCheck, IconLoader } from '@/components/icons';
+import { IconArrowRight, IconUpload, IconSparkles, IconChart, IconDatabase, IconCheck, IconLoader, IconTime } from '@/components/icons';
 import api from '@/lib/api';
 import styles from './page.module.css';
 
@@ -17,16 +17,30 @@ const suggestedQueries = [
 const analysisButtons = [
     { id: 'data_speaks', label: 'Data Speaks (EDA)', icon: IconSparkles, plan: null },
     { id: 'schema', label: 'Schema', icon: IconDatabase, plan: [{ operator: 'schema_snapshot', params: {} }] },
+    { id: 'risk', label: 'Privacy & Risk', icon: IconCheck, plan: [{ operator: 'privacy_risk_scan', params: {} }] },
     { id: 'preview', label: 'Preview Rows', icon: IconDatabase, plan: [{ operator: 'preview_rows', params: { limit: 25 } }] },
     { id: 'missing', label: 'Missingness', icon: IconCheck, plan: [{ operator: 'missingness_scan', params: {} }] },
+    { id: 'missing_patterns', label: 'Missingness Patterns', icon: IconCheck, plan: [{ operator: 'missingness_patterns', params: {} }] },
+    { id: 'uniqueness', label: 'Uniqueness', icon: IconCheck, plan: [{ operator: 'uniqueness_scan', params: { max_columns: 200 } }] },
+    { id: 'text', label: 'Text Summary', icon: IconDatabase, plan: [{ operator: 'text_summary', params: { max_columns: 25 } }] },
+    { id: 'trend', label: 'Trend (Auto)', icon: IconChart, plan: [{ operator: 'resample_aggregate', params: { freq: 'M', max_points: 200 } }] },
+    { id: 'time_anomalies', label: 'Time Anomalies', icon: IconTime, plan: [{ operator: 'time_anomaly_scan', params: { freq: 'M', max_points: 200 } }] },
+    { id: 'segments', label: 'Segments (Auto)', icon: IconDatabase, plan: [{ operator: 'segment_summary', params: { limit: 50 } }] },
+    { id: 'segment_deep_dive', label: 'Segment Deep Dive', icon: IconDatabase, plan: [{ operator: 'segment_deep_dive', params: { limit: 10 } }] },
     { id: 'correlation', label: 'Correlation', icon: IconChart, plan: [{ operator: 'correlation_matrix', params: { max_columns: 25 } }] },
+    { id: 'associations', label: 'Associations', icon: IconChart, plan: [{ operator: 'association_scan', params: { max_categorical_columns: 20, max_numeric_columns: 20, max_pairs: 200 } }] },
     { id: 'outliers', label: 'Outliers', icon: IconSparkles, plan: [{ operator: 'outlier_scan', params: { max_columns: 25 } }] },
+    { id: 'outlier_explain', label: 'Explain Outliers', icon: IconSparkles, plan: [{ operator: 'outlier_explain', params: {} }] },
 ];
 
 export default function NewAnalysisPage() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const datasetIdParam = searchParams.get('dataset');
+    const promptParam = searchParams.get('prompt');
+    const autoSendParam = searchParams.get('autoSend');
+    const actionParam = searchParams.get('action');
+    const autoRunParam = searchParams.get('autoRun');
     const [activeDatasetId, setActiveDatasetId] = useState(datasetIdParam);
 
     useEffect(() => {
@@ -46,6 +60,8 @@ export default function NewAnalysisPage() {
     const [runningAnalysis, setRunningAnalysis] = useState(null);
     const messagesEndRef = useRef(null);
     const fileInputRef = useRef(null);
+    const promptConsumedRef = useRef(false);
+    const actionConsumedRef = useRef(false);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -55,40 +71,64 @@ export default function NewAnalysisPage() {
         scrollToBottom();
     }, [messages]);
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        if (!input.trim() || isLoading) return;
+    const sendChatMessage = async (userMessage) => {
+        const text = String(userMessage || '').trim();
+        if (!text || isLoading) return;
 
-        const userMessage = input.trim();
         setInput('');
-        setMessages(prev => [...prev, { role: 'user', content: userMessage }]);
+        setMessages((prev) => [...prev, { role: 'user', content: text }]);
         setIsLoading(true);
 
         try {
-            // Call the real backend API
-            const response = await api.sendMessage(userMessage, conversationId, activeDatasetId);
+            const response = await api.sendMessage(text, conversationId, activeDatasetId);
 
             if (response.conversation_id) {
                 setConversationId(response.conversation_id);
             }
 
-            setMessages(prev => [...prev, {
-                role: 'assistant',
-                content: response.content || 'I processed your request.',
-                suggestions: response.suggestions,
-                agentActions: response.agent_actions,
-            }]);
+            setMessages((prev) => [
+                ...prev,
+                {
+                    role: 'assistant',
+                    content: response.content || 'I could not compute an answer for that yet.',
+                    suggestions: response.suggestions,
+                    agentActions: response.agent_actions,
+                },
+            ]);
         } catch (error) {
             console.error('Chat error:', error);
-            // Fallback to simulated response
-            setMessages(prev => [...prev, {
-                role: 'assistant',
-                content: `I understand you want to "${userMessage}". Let me analyze that for you...\n\nBased on your request, I would:\n1. First examine the data structure\n2. Apply the appropriate analysis method\n3. Generate visualizations and insights\n\n${!activeDatasetId ? 'To proceed, please upload a dataset or select one from your existing datasets.' : 'Processing your request on the selected dataset...'}`
-            }]);
+            setMessages((prev) => [
+                ...prev,
+                {
+                    role: 'assistant',
+                    content: `Request failed: ${error?.message || 'Unknown error'}`,
+                },
+            ]);
         } finally {
             setIsLoading(false);
         }
     };
+
+    const handleSubmit = async (e) => {
+        e.preventDefault();
+        await sendChatMessage(input);
+    };
+
+    useEffect(() => {
+        const p = String(promptParam || '').trim();
+        if (!p) return;
+        if (promptConsumedRef.current) return;
+        promptConsumedRef.current = true;
+
+        setInput(p);
+        const auto = String(autoSendParam || '').toLowerCase();
+        if (auto === '1' || auto === 'true') {
+            // Defer to allow state to settle before sending.
+            setTimeout(() => {
+                sendChatMessage(p);
+            }, 0);
+        }
+    }, [promptParam, autoSendParam]);
 
     const handleSuggestionClick = (query) => {
         setInput(query);
@@ -118,6 +158,31 @@ export default function NewAnalysisPage() {
         throw new Error('Timed out waiting for dataset processing to complete');
     };
 
+    const waitForAnalysisDone = async (analysisId, { timeoutMs = 5 * 60 * 1000 } = {}) => {
+        const deadline = Date.now() + timeoutMs;
+        let attempt = 0;
+
+        while (Date.now() < deadline) {
+            const analysis = await api.getAnalysis(analysisId);
+            const status = String(analysis?.status || '').toLowerCase();
+
+            if (status === 'completed') return analysis;
+            if (status === 'failed') {
+                const msg = analysis?.error_message || 'Analysis failed';
+                throw new Error(msg);
+            }
+            if (status === 'cancelled') {
+                throw new Error('Analysis was cancelled');
+            }
+
+            attempt += 1;
+            const delay = Math.min(2500, 400 + attempt * 200);
+            await sleep(delay);
+        }
+
+        throw new Error('Timed out waiting for analysis to complete');
+    };
+
     const handleAnalysisButton = async (btn) => {
         if (!activeDatasetId) {
             setMessages(prev => [...prev, {
@@ -127,8 +192,9 @@ export default function NewAnalysisPage() {
             return;
         }
 
+        let ds = null;
         try {
-            const ds = await api.getDataset(activeDatasetId);
+            ds = await api.getDataset(activeDatasetId);
             if (String(ds?.status || '').toLowerCase() !== 'ready') {
                 setMessages(prev => [...prev, {
                     role: 'assistant',
@@ -148,11 +214,23 @@ export default function NewAnalysisPage() {
         setMessages(prev => [...prev, { role: 'user', content: `Run ${btn.label}` }]);
 
         try {
-            const result = await api.runDataSpeaks(activeDatasetId, btn.plan);
+            const analysisName = `${btn.label}: ${ds?.name || activeDatasetId}`;
+            const config = { sample_rows: 200_000, ...(Array.isArray(btn.plan) ? { plan: btn.plan } : {}) };
+            const created = await api.createAnalysis(analysisName, activeDatasetId, 'eda', config);
 
-            const steps = result?.steps || [];
+            setMessages(prev => [...prev, {
+                role: 'assistant',
+                content: `Started analysis.\n- analysis_id: ${created?.id}\n- status: ${created?.status}\n\nYou can open it here: /app/analysis/${created?.id}`
+            }]);
+
+            const final = await waitForAnalysisDone(created?.id);
+            const steps = final?.results?.steps || [];
+
             const lines = [];
             lines.push(`${btn.label} complete.`);
+            lines.push('');
+            lines.push(`Analysis ID: ${final?.id}`);
+            lines.push(`Status: ${final?.status}`);
             lines.push('');
             for (const s of steps) {
                 const summary = s?.summary;
@@ -174,6 +252,21 @@ export default function NewAnalysisPage() {
             setRunningAnalysis(null);
         }
     };
+
+    useEffect(() => {
+        const actionId = String(actionParam || '').trim();
+        if (!actionId) return;
+        if (actionConsumedRef.current) return;
+
+        const auto = String(autoRunParam || '').toLowerCase();
+        if (!(auto === '1' || auto === 'true')) return;
+
+        const btn = analysisButtons.find((b) => b.id === actionId);
+        if (!btn) return;
+
+        actionConsumedRef.current = true;
+        handleAnalysisButton(btn);
+    }, [actionParam, autoRunParam, activeDatasetId]);
 
     const handleFileUpload = async (e) => {
         const file = e.target.files?.[0];

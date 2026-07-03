@@ -3,7 +3,7 @@
 
 from fastapi import APIRouter
 
-from app.api.routes import datasets, chat, analyses, auth, ml, analytics, connections, data_quality, data_speaks
+from app.api.routes import datasets, chat, analyses, auth, ml, analytics, connections, data_quality, data_speaks, jobs, dashboard, artifacts, metrics, shares, maintenance
 
 # Create main router
 api_router = APIRouter()
@@ -18,6 +18,13 @@ api_router.include_router(analytics.router, prefix="/analytics", tags=["Analytic
 api_router.include_router(connections.router, prefix="/connections", tags=["Database Connections"])
 api_router.include_router(data_quality.router, prefix="/quality", tags=["Data Quality"])
 api_router.include_router(data_speaks.router, prefix="/data-speaks", tags=["Data Speaks"])
+api_router.include_router(jobs.router, prefix="/jobs", tags=["Jobs"])
+api_router.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
+api_router.include_router(artifacts.router, prefix="/artifacts", tags=["Artifacts"])
+api_router.include_router(metrics.router, prefix="/metrics", tags=["Metrics"])
+api_router.include_router(shares.router, prefix="/shares", tags=["Shares"])
+api_router.include_router(shares.public_router, prefix="/public", tags=["Public"])
+api_router.include_router(maintenance.router, prefix="/maintenance", tags=["Maintenance"])
 
 __all__ = [
     "api_router",
@@ -30,5 +37,11 @@ __all__ = [
     "connections",
     "data_quality",
     "data_speaks",
+    "jobs",
+    "dashboard",
+    "artifacts",
+    "metrics",
+    "shares",
+    "maintenance",
 ]
 

@@ -24,6 +24,7 @@ from app.core.logging import (
     generate_request_id,
     LogContext
 )
+from app.core.metrics import metrics_collector
 from app.services.database import init_database, close_database
 
 logger = get_logger(__name__)
@@ -114,7 +115,23 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
             
             # Log request completion
             duration_ms = (datetime.utcnow() - start_time).total_seconds() * 1000
-            
+
+            route_path = request.url.path
+            try:
+                route = request.scope.get("route")
+                template = getattr(route, "path", None)
+                if template:
+                    route_path = str(template)
+            except Exception:
+                route_path = request.url.path
+
+            metrics_collector.record_http_request(
+                method=request.method,
+                route=route_path,
+                status_code=response.status_code,
+                duration_ms=duration_ms,
+            )
+
             log_context = LogContext(
                 request_id=request_id,
                 operation="http_request",
@@ -336,18 +353,65 @@ def create_application() -> FastAPI:
         """Readiness check for Kubernetes."""
         # Check database connectivity
         from app.services.database import db_manager
-        db_healthy = await db_manager.health_check()
-        
+        from app.core.config import JobExecutor
+        from app.services.object_store import get_object_store, ObjectStoreBackend
+        db_healthy, db_detail = await db_manager.health_check_detail()
+
+        def _check_dir(path):
+            try:
+                from pathlib import Path
+
+                p = Path(path)
+                p.mkdir(parents=True, exist_ok=True)
+                test = p / ".na_ready_check"
+                with test.open("wb") as f:
+                    f.write(b"ok")
+                test.unlink(missing_ok=True)
+                return True
+            except Exception:
+                return False
+
+        obj_store = get_object_store()
+        storage_health = obj_store.storage_health()
+
+        uploads_ok = _check_dir(settings.upload_directory)
+        artifacts_ok = _check_dir(settings.artifact_directory)
+        if obj_store.backend == ObjectStoreBackend.S3:
+            uploads_ok = bool(storage_health.get("status") == "healthy")
+            artifacts_ok = uploads_ok
+
+        queue_ok = True
+        queue_detail = None
+        if settings.job_executor == JobExecutor.CELERY:
+            queue_ok = False
+            try:
+                from redis import Redis
+
+                r = Redis.from_url(settings.celery.broker_url, socket_connect_timeout=2, socket_timeout=2)
+                r.ping()
+                queue_ok = True
+            except ImportError:
+                queue_detail = "redis client not installed"
+            except Exception as e:
+                queue_detail = str(e)
+
         services = {
-            "database": {"status": "healthy" if db_healthy else "unhealthy"}
+            "database": {
+                "status": "healthy" if db_healthy else "unhealthy",
+                "detail": (db_detail if (not db_healthy and settings.is_development) else None),
+            },
+            "uploads": {"status": "healthy" if uploads_ok else "unhealthy"},
+            "artifacts": {"status": "healthy" if artifacts_ok else "unhealthy"},
+            "object_store": storage_health,
+            "queue": {"status": "healthy" if queue_ok else "unhealthy", "detail": queue_detail},
         }
-        
-        all_healthy = all(s["status"] == "healthy" for s in services.values())
-        
+
+        all_healthy = all(s.get("status") == "healthy" for s in services.values())
+
         return {
             "status": "ready" if all_healthy else "not_ready",
             "services": services,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
     
     @app.get("/", tags=["Root"])

@@ -3,15 +3,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
-import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.api.schemas import (
     APIResponse,
@@ -24,6 +26,18 @@ from app.api.schemas import (
     DatasetUploadResponse,
     DatasetStatus,
     ColumnInfo,
+    DatasetVersionResponse,
+    DatasetTransformStep,
+    DatasetTransformPreviewRequest,
+    DatasetTransformPreviewResponse,
+    DatasetTransformApplyRequest,
+    DatasetTransformApplyResponse,
+    DatasetTransformSuggestRequest,
+    DatasetTransformSuggestion,
+    DatasetTransformSuggestResponse,
+    DatasetQueryRequest,
+    DatasetQueryResponse,
+    ArtifactResponse,
 )
 from app.core.config import settings
 from app.core.exceptions import (
@@ -32,7 +46,12 @@ from app.core.exceptions import (
     DataNotFoundException,
 )
 from app.core.logging import get_logger, LogContext
+from app.core.serialization import to_jsonable
+from app.compute.artifacts import ArtifactStore, TableStorageFormat
+from app.models import Artifact as ArtifactModel
+from app.services.artifact_index import ArtifactIndexService
 from app.services.database import get_db_session
+from app.services.dataset_loader import DatasetLoaderService
 from app.api.routes.auth import require_permission
 from app.services.auth_service import AuthUser, Permission
 
@@ -53,6 +72,84 @@ def _sanitize_filename(name: str) -> str:
     base = Path(name).name
     base = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._")
     return base or "upload"
+
+
+def _run_duckdb_query_sync(*, file_path: str, file_format: str, sql: str) -> tuple["pd.DataFrame", float]:
+    import duckdb
+    import pandas as pd
+
+    def _quote(value: str) -> str:
+        v = str(value or "")
+        v = v.replace("\\", "/")
+        v = v.replace("'", "''")
+        return f"'{v}'"
+
+    con = duckdb.connect(database=":memory:")
+    try:
+        fmt = str(file_format or "").lower().strip()
+        if fmt == "parquet":
+            con.execute(f"CREATE VIEW dataset AS SELECT * FROM read_parquet({_quote(file_path)})")
+        elif fmt in {"csv", "tsv"}:
+            con.execute(f"CREATE VIEW dataset AS SELECT * FROM read_csv_auto({_quote(file_path)})")
+        else:
+            raise ValueError("Dataset SQL is supported for CSV/TSV/Parquet only")
+
+        t0 = time.perf_counter()
+        df: pd.DataFrame = con.execute(str(sql)).df()
+        dur_ms = (time.perf_counter() - t0) * 1000.0
+        return df, float(dur_ms)
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def _load_query_source_df(*, file_path: str, file_format: str) -> "pd.DataFrame":
+    import pandas as pd
+
+    fmt = str(file_format or "").lower().strip()
+    if fmt == "parquet":
+        return pd.read_parquet(file_path)
+    if fmt == "csv":
+        return pd.read_csv(file_path)
+    if fmt == "tsv":
+        return pd.read_csv(file_path, sep="\t")
+    raise ValueError("Dataset SQL is supported for CSV/TSV/Parquet only")
+
+
+def _run_sqlite_query_sync(*, file_path: str, file_format: str, sql: str) -> tuple["pd.DataFrame", float]:
+    import sqlite3
+    import pandas as pd
+
+    src_df = _load_query_source_df(file_path=file_path, file_format=file_format)
+    con = sqlite3.connect(":memory:")
+    try:
+        src_df.to_sql("dataset", con, if_exists="replace", index=False)
+        t0 = time.perf_counter()
+        out_df: pd.DataFrame = pd.read_sql_query(str(sql), con)
+        dur_ms = (time.perf_counter() - t0) * 1000.0
+        return out_df, float(dur_ms)
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
+
+
+def _run_dataset_query_sync(*, file_path: str, file_format: str, sql: str) -> tuple["pd.DataFrame", float]:
+    try:
+        return _run_duckdb_query_sync(file_path=file_path, file_format=file_format, sql=sql)
+    except ModuleNotFoundError as e:
+        # Keep queries working in lightweight OSS/dev setups where DuckDB is optional.
+        name = str(getattr(e, "name", "") or "").lower()
+        if name not in {"duckdb", "_duckdb"} and "duckdb" not in str(e).lower():
+            raise
+        return _run_sqlite_query_sync(file_path=file_path, file_format=file_format, sql=sql)
+    except ImportError as e:
+        if "duckdb" not in str(e).lower():
+            raise
+        return _run_sqlite_query_sync(file_path=file_path, file_format=file_format, sql=sql)
 
 
 # ============================================================================
@@ -237,18 +334,22 @@ async def upload_dataset(
         )
     
     try:
-        # Create upload directory
-        upload_dir = Path(settings.upload_directory)
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Generate unique file path
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        safe_filename = f"{timestamp}_{user_id}_{safe_original_filename}"
-        file_path = upload_dir / safe_filename
-        
-        # Save file
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        # Store the file via the configured object store (local disk or S3).
+        from app.services.object_store import get_object_store
+
+        obj = get_object_store()
+        try:
+            file.file.seek(0)
+        except Exception:
+            pass
+
+        storage_path = await asyncio.to_thread(
+            obj.put_upload,
+            owner_id=user_id,
+            original_filename=safe_original_filename,
+            src=file.file,
+            content_type=getattr(file, "content_type", None),
+        )
         
         logger.info(
             f"File uploaded: {original_filename}",
@@ -265,22 +366,36 @@ async def upload_dataset(
             name=name,
             description=description,
             original_filename=original_filename,
-            file_path=str(file_path),
+            file_path=str(storage_path),
             file_size=file_size,
             file_format=extension,
             owner_id=user_id,
             tags=tag_list
         )
 
-        # Kick off processing asynchronously so upload can return quickly.
-        # For distributed processing (multi-instance), wire this to Celery/Redis.
-        from app.services.dataset_processing import DatasetProcessingService
+        # Create a persisted job record for processing.
+        from app.models import Job, JobType, JobStatus
+        from app.workers.dispatcher import enqueue_dataset_processing
 
-        if background_tasks is not None:
-            background_tasks.add_task(DatasetProcessingService().process_dataset, dataset.id)
+        job = Job(
+            owner_id=user_id,
+            dataset_id=dataset.id,
+            job_type=JobType.DATASET_PROCESSING,
+            status=JobStatus.QUEUED,
+            progress=0.0,
+            status_message="Queued dataset processing",
+            payload={"dataset_id": str(dataset.id)},
+            result={},
+        )
+        db.add(job)
+        await db.commit()
+        await db.refresh(job)
+
+        enqueue_dataset_processing(background_tasks=background_tasks, dataset_id=dataset.id, job_id=job.id)
         
         response = DatasetUploadResponse(
             dataset_id=dataset.id,
+            job_id=job.id,
             filename=original_filename,
             file_size_bytes=file_size,
             status=_schema_dataset_status(dataset.status),
@@ -491,6 +606,57 @@ async def delete_dataset(
 
 
 @router.post(
+    "/{dataset_id}/purge",
+    response_model=APIResponse[dict[str, Any]],
+    summary="Purge dataset (delete blobs + metadata)",
+    description="Destructive purge: delete stored dataset files, derived artifacts, and hard-delete metadata rows.",
+)
+async def purge_dataset(
+    dataset_id: UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.DELETE_DATA)),
+):
+    from app.models import Dataset as DatasetModel
+    from app.models import Job as JobModel, JobStatus as ModelJobStatus, JobType as ModelJobType
+    from app.workers.dispatcher import enqueue_dataset_purge
+
+    ds = (await db.execute(
+        select(DatasetModel).where(DatasetModel.id == dataset_id, DatasetModel.owner_id == user.user_id)
+    )).scalars().first()
+    if ds is None:
+        raise DataNotFoundException("Dataset", dataset_id)
+
+    # Hide from UI immediately; purge job will remove storage + metadata fully.
+    if not bool(getattr(ds, "is_deleted", False)):
+        ds.soft_delete()
+        ds.updated_by = user.user_id
+        await db.commit()
+
+    # Create a durable job record so users can track progress.
+    job = JobModel(
+        owner_id=user.user_id,
+        dataset_id=dataset_id,
+        job_type=ModelJobType.DATASET_PURGE,
+        status=ModelJobStatus.QUEUED,
+        progress=0.0,
+        status_message="Queued dataset purge",
+        payload={"dataset_id": str(dataset_id)},
+        result={},
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    enqueue_dataset_purge(background_tasks=background_tasks, dataset_id=dataset_id, job_id=job.id)
+
+    return APIResponse.success(
+        data={"dataset_id": str(dataset_id), "job_id": str(job.id)},
+        message="Dataset purge started",
+    )
+
+
+@router.post(
     "/{dataset_id}/process",
     response_model=APIResponse[DatasetResponse],
     summary="Process dataset",
@@ -540,9 +706,24 @@ async def process_dataset(
     # Mark as processing and enqueue background work.
     dataset = await repo.update(dataset_id, {"status": ModelDatasetStatus.PROCESSING, "error_message": None})
 
-    from app.services.dataset_processing import DatasetProcessingService
+    from app.models import Job, JobType, JobStatus
+    from app.workers.dispatcher import enqueue_dataset_processing
 
-    background_tasks.add_task(DatasetProcessingService().process_dataset, dataset.id)
+    job = Job(
+        owner_id=user.user_id,
+        dataset_id=dataset.id,
+        job_type=JobType.DATASET_PROCESSING,
+        status=JobStatus.QUEUED,
+        progress=0.0,
+        status_message="Queued dataset processing",
+        payload={"dataset_id": str(dataset.id)},
+        result={},
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    enqueue_dataset_processing(background_tasks=background_tasks, dataset_id=dataset.id, job_id=job.id)
 
     logger.info("Dataset processing enqueued", context=context, dataset_id=str(dataset.id))
 
@@ -566,4 +747,505 @@ async def process_dataset(
     return APIResponse.success(
         data=response,
         message="Dataset processing started",
+        meta={"job_id": str(job.id)},
     )
+
+
+@router.post(
+    "/{dataset_id}/query",
+    response_model=APIResponse[DatasetQueryResponse],
+    summary="Query uploaded dataset (SQL)",
+    description="Run a guarded, read-only SQL query against an uploaded dataset using DuckDB; produces a table artifact.",
+)
+async def query_uploaded_dataset(
+    dataset_id: UUID,
+    request: DatasetQueryRequest,
+    db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.READ_DATA)),
+):
+    repo = DatasetRepository(db)
+    dataset = await repo.get_by_id(dataset_id)
+    if not dataset or dataset.owner_id != user.user_id:
+        raise DataNotFoundException("Dataset", dataset_id)
+
+    from app.models import DatasetStatus as ModelDatasetStatus
+
+    if dataset.status != ModelDatasetStatus.READY:
+        raise HTTPException(status_code=400, detail="Dataset must be processed (ready) before querying")
+
+    from app.services.sql_safety import UnsafeSQLError, enforce_row_limit, validate_dataset_sql
+
+    try:
+        normalized = validate_dataset_sql(request.query)
+    except UnsafeSQLError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    max_rows = int(request.max_rows or settings.connections.max_query_rows)
+    max_rows = max(1, min(max_rows, int(settings.connections.max_query_rows)))
+    limited = enforce_row_limit(normalized, max_rows)
+
+    timeout = int(settings.connections.query_timeout_seconds)
+    if request.timeout_seconds is not None:
+        timeout = max(1, min(int(request.timeout_seconds), int(settings.connections.query_timeout_seconds)))
+
+    file_path = str(getattr(dataset, "file_path", "") or "").strip()
+    file_format = str(getattr(dataset, "file_format", "") or "").strip().lower()
+    if not file_path:
+        raise HTTPException(status_code=400, detail="Dataset is missing a file_path")
+
+    # file_path may be on local disk or remote object storage (S3). DuckDB requires a local file path.
+    try:
+        from app.services.object_store import get_object_store
+
+        obj = get_object_store()
+        local_path = obj.ensure_local_path(
+            file_path,
+            expected_size_bytes=int(getattr(dataset, "file_size_bytes", 0) or 0) or None,
+            filename_hint=str(getattr(dataset, "original_filename", "") or ""),
+        )
+        file_path = str(local_path)
+    except Exception:
+        # Best-effort: keep existing behavior for local paths.
+        pass
+
+    try:
+        df, dur_ms = await asyncio.wait_for(
+            asyncio.to_thread(_run_dataset_query_sync, file_path=file_path, file_format=file_format, sql=limited),
+            timeout=float(timeout),
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=408, detail=f"Query timed out after {timeout}s")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    dataset_version = None
+    if isinstance(getattr(dataset, "profile_report", None), dict):
+        dataset_version = str(dataset.profile_report.get("file_hash") or "").strip() or None
+
+    store = ArtifactStore()
+    ref = store.write_table(
+        name=f"dataset_sql:{dataset_id}",
+        df=df,
+        storage_format=TableStorageFormat.PARQUET,
+        dataset_id=dataset_id,
+        dataset_version=dataset_version,
+        operator_name="dataset_sql",
+        operator_params={"query": normalized, "max_rows": int(max_rows)},
+    )
+    await ArtifactIndexService(db).index_many(owner_id=user.user_id, refs=[ref])
+
+    art = (
+        (
+            await db.execute(
+                select(ArtifactModel).where(
+                    ArtifactModel.id == ref.artifact_id,
+                    ArtifactModel.owner_id == user.user_id,
+                    ArtifactModel.is_deleted == False,  # noqa: E712
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if art is None:
+        raise HTTPException(status_code=500, detail="Artifact indexing failed")
+
+    resp = DatasetQueryResponse(
+        columns=[str(c) for c in df.columns.tolist()],
+        row_count=int(df.shape[0]),
+        execution_time_ms=float(dur_ms),
+        artifact=ArtifactResponse.model_validate(art),
+    )
+
+    # PII-safe default for UI previews: redact preview rows when the dataset schema flags PII.
+    try:
+        from app.core.redaction import mask_preview
+
+        schema = getattr(dataset, "schema_info", None) or {}
+        cols = schema.get("columns") if isinstance(schema, dict) else None
+        pii_cols: set[str] = set()
+        if isinstance(cols, list):
+            for c in cols:
+                if not isinstance(c, dict):
+                    continue
+                name = c.get("name")
+                if not name:
+                    continue
+                stats = c.get("statistics") if isinstance(c.get("statistics"), dict) else {}
+                is_pii = bool(c.get("is_potential_pii") or stats.get("is_potential_pii"))
+                if is_pii:
+                    pii_cols.add(str(name))
+        if pii_cols and isinstance(resp.artifact.preview, dict):
+            resp.artifact.preview = mask_preview(resp.artifact.preview, pii_cols)
+    except Exception:
+        pass
+    return APIResponse.success(data=resp, message="Query executed")
+
+
+@router.get(
+    "/{dataset_id}/versions",
+    response_model=PaginatedResponse[DatasetVersionResponse],
+    summary="List dataset versions",
+    description="List immutable dataset versions (uploads + transformations) for this dataset.",
+)
+async def list_dataset_versions(
+    dataset_id: UUID,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.READ_DATA)),
+):
+    from sqlalchemy import func, select
+
+    from app.models import DatasetVersion
+
+    repo = DatasetRepository(db)
+    dataset = await repo.get_by_id(dataset_id)
+    if not dataset or dataset.owner_id != user.user_id:
+        raise DataNotFoundException("Dataset", dataset_id)
+
+    skip = (page - 1) * page_size
+    q = select(DatasetVersion).where(
+        DatasetVersion.dataset_id == dataset_id,
+        DatasetVersion.owner_id == user.user_id,
+        DatasetVersion.is_deleted == False,  # noqa: E712
+    )
+
+    total = (await db.execute(select(func.count()).select_from(q.subquery()))).scalar() or 0
+    versions = (await db.execute(q.order_by(DatasetVersion.created_at.desc()).offset(skip).limit(page_size))).scalars().all()
+
+    active_path = str(dataset.file_path)
+    items: list[DatasetVersionResponse] = []
+    for v in versions:
+        spec = v.transform_spec if isinstance(getattr(v, "transform_spec", None), dict) else {}
+        items.append(
+            DatasetVersionResponse(
+                id=v.id,
+                dataset_id=v.dataset_id,
+                version_hash=v.version_hash,
+                label=v.label,
+                parent_version_hash=v.parent_version_hash,
+                transform_spec=spec,
+                file_format=v.file_format,
+                file_size_bytes=int(v.file_size_bytes or 0),
+                row_count=v.row_count,
+                column_count=v.column_count,
+                quality_score=v.quality_score,
+                created_at=v.created_at,
+                updated_at=v.updated_at,
+                is_active=str(getattr(v, "file_path", "")) == active_path,
+            )
+        )
+
+    total_pages = (int(total) + page_size - 1) // page_size
+    return PaginatedResponse(
+        status="success",
+        data=items,
+        pagination=PaginationMeta(
+            total=int(total),
+            page=page,
+            page_size=page_size,
+            total_pages=int(total_pages),
+            has_next=page < total_pages,
+            has_prev=page > 1,
+        ),
+    )
+
+
+@router.post(
+    "/{dataset_id}/versions/{version_id}/activate",
+    response_model=APIResponse[DatasetResponse],
+    summary="Activate dataset version",
+    description="Switch the dataset to a previous version (rollback) without reprocessing (uses stored snapshots).",
+)
+async def activate_dataset_version(
+    dataset_id: UUID,
+    version_id: UUID,
+    db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.WRITE_DATA)),
+):
+    from sqlalchemy import delete, select
+
+    from app.models import Dataset as DatasetModel
+    from app.models import DatasetColumn as DatasetColumnModel
+    from app.models import DatasetStatus as ModelDatasetStatus
+    from app.models import DatasetVersion as DatasetVersionModel
+
+    ds = (
+        (await db.execute(
+            select(DatasetModel).where(
+                DatasetModel.id == dataset_id,
+                DatasetModel.is_deleted == False,  # noqa: E712
+                DatasetModel.owner_id == user.user_id,
+            )
+        ))
+        .scalars()
+        .first()
+    )
+    if ds is None:
+        raise DataNotFoundException("Dataset", dataset_id)
+
+    ver = (
+        (await db.execute(
+            select(DatasetVersionModel).where(
+                DatasetVersionModel.id == version_id,
+                DatasetVersionModel.dataset_id == dataset_id,
+                DatasetVersionModel.owner_id == user.user_id,
+                DatasetVersionModel.is_deleted == False,  # noqa: E712
+            )
+        ))
+        .scalars()
+        .first()
+    )
+    if ver is None:
+        raise DataNotFoundException("DatasetVersion", version_id)
+
+    try:
+        from app.services.object_store import get_object_store
+
+        obj = get_object_store()
+        if not obj.exists(str(getattr(ver, "file_path", ""))):
+            raise HTTPException(status_code=400, detail="Version file is missing on server storage")
+    except HTTPException:
+        raise
+    except Exception:
+        # Fall back to local path check.
+        p = Path(str(getattr(ver, "file_path", "")))
+        if not p.exists():
+            raise HTTPException(status_code=400, detail="Version file is missing on server storage")
+
+    # Apply the version snapshot to the dataset record.
+    ds.file_path = str(ver.file_path)
+    ds.file_format = str(ver.file_format)
+    ds.file_size_bytes = int(ver.file_size_bytes or 0)
+    ds.status = ModelDatasetStatus.READY
+    ds.error_message = None
+    ds.row_count = ver.row_count
+    ds.column_count = ver.column_count
+    ds.schema_info = to_jsonable(ver.schema_info or {})
+    ds.quality_score = ver.quality_score
+    ds.quality_report = to_jsonable(ver.quality_report or {})
+    ds.profile_report = to_jsonable(ver.profile_report or {})
+    ds.updated_by = user.user_id
+
+    # Rebuild dataset_columns from the stored schema snapshot.
+    cols = []
+    schema = ver.schema_info if isinstance(ver.schema_info, dict) else {}
+    schema_cols = schema.get("columns")
+    if isinstance(schema_cols, list):
+        cols = schema_cols
+    elif isinstance(ver.profile_report, dict) and isinstance(ver.profile_report.get("columns"), list):
+        cols = ver.profile_report.get("columns")
+
+    await db.execute(delete(DatasetColumnModel).where(DatasetColumnModel.dataset_id == dataset_id))
+    for col in cols:
+        if not isinstance(col, dict):
+            continue
+        name = str(col.get("name") or "")
+        if not name:
+            continue
+        db.add(
+            DatasetColumnModel(
+                dataset_id=dataset_id,
+                name=name,
+                original_name=str(col.get("original_name") or name),
+                position=int(col.get("position") or 0),
+                inferred_type=str(col.get("inferred_type") or "unknown"),
+                semantic_type=None,
+                null_count=int(col.get("null_count") or 0),
+                null_percentage=float(col.get("null_percentage") or 0.0),
+                unique_count=int(col.get("unique_count") or 0),
+                min_value=col.get("min_value"),
+                max_value=col.get("max_value"),
+                mean_value=col.get("mean_value"),
+                median_value=col.get("median_value"),
+                std_value=col.get("std_value"),
+                distribution_type=None,
+                value_distribution=to_jsonable(col.get("value_distribution") or {}),
+                has_outliers=bool(col.get("has_outliers") or False),
+                is_sensitive=bool(col.get("is_potential_pii") or False),
+                statistics=to_jsonable(col),
+            )
+        )
+
+    await db.commit()
+    await db.refresh(ds)
+
+    resp = DatasetResponse(
+        id=ds.id,
+        name=ds.name,
+        description=ds.description,
+        original_filename=ds.original_filename,
+        file_size_bytes=ds.file_size_bytes,
+        file_format=ds.file_format,
+        status=_schema_dataset_status(ds.status),
+        error_message=ds.error_message,
+        row_count=ds.row_count,
+        column_count=ds.column_count,
+        quality_score=ds.quality_score,
+        tags=ds.tags,
+        created_at=ds.created_at,
+        updated_at=ds.updated_at,
+    )
+
+    return APIResponse.success(data=resp, message="Dataset version activated")
+
+
+@router.post(
+    "/{dataset_id}/transform/suggest",
+    response_model=APIResponse[DatasetTransformSuggestResponse],
+    summary="Suggest dataset transformation plan",
+    description="Generate a deterministic no-code cleaning plan from dataset metadata.",
+)
+async def suggest_dataset_transform(
+    dataset_id: UUID,
+    request: DatasetTransformSuggestRequest,
+    db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS)),
+):
+    repo = DatasetRepository(db)
+    dataset = await repo.get_by_id(dataset_id)
+    if not dataset or dataset.owner_id != user.user_id:
+        raise DataNotFoundException("Dataset", dataset_id)
+
+    from app.models import DatasetStatus as ModelDatasetStatus
+
+    if dataset.status != ModelDatasetStatus.READY:
+        raise HTTPException(status_code=400, detail="Dataset must be processed (ready) before generating transform suggestions")
+
+    from app.services.dataset_transform_suggestions import DatasetTransformSuggestionService
+
+    suggested = DatasetTransformSuggestionService().suggest(
+        dataset,
+        max_steps=int(request.max_steps),
+        include_drop_columns=bool(request.include_drop_columns),
+        include_string_normalization=bool(request.include_string_normalization),
+    )
+
+    items: list[DatasetTransformSuggestion] = []
+    for item in suggested.suggestions:
+        step_raw = item.get("step") if isinstance(item, dict) else None
+        if not isinstance(step_raw, dict):
+            continue
+        try:
+            step = DatasetTransformStep.model_validate(step_raw)
+        except Exception:
+            continue
+        items.append(
+            DatasetTransformSuggestion(
+                step=step,
+                reason=str(item.get("reason") or "Suggested by deterministic rule"),
+                impact=str(item.get("impact")) if item.get("impact") is not None else None,
+            )
+        )
+
+    resp = DatasetTransformSuggestResponse(
+        dataset_id=dataset_id,
+        suggestions=items,
+        warnings=list(suggested.warnings or []),
+        summary=to_jsonable(suggested.summary or {}),
+    )
+    return APIResponse.success(data=resp, message="Transformation suggestions generated")
+
+
+@router.post(
+    "/{dataset_id}/transform/preview",
+    response_model=APIResponse[DatasetTransformPreviewResponse],
+    summary="Preview dataset transformation",
+    description="Apply a transformation pipeline on a bounded sample and return a diff + preview.",
+)
+async def preview_dataset_transform(
+    dataset_id: UUID,
+    request: DatasetTransformPreviewRequest,
+    db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS)),
+):
+    repo = DatasetRepository(db)
+    dataset = await repo.get_by_id(dataset_id)
+    if not dataset or dataset.owner_id != user.user_id:
+        raise DataNotFoundException("Dataset", dataset_id)
+
+    from app.services.dataset_transformations import DatasetTransformError, apply_transform_steps, build_preview_diff
+
+    from app.models import DatasetStatus as ModelDatasetStatus
+
+    if dataset.status != ModelDatasetStatus.READY:
+        raise HTTPException(status_code=400, detail="Dataset must be processed (ready) before transforming")
+
+    loader = DatasetLoaderService(db)
+    loaded = await loader.load_dataset(
+        dataset_id,
+        owner_id=user.user_id,
+        require_ready=True,
+        sample_rows=int(request.sample_rows),
+    )
+
+    try:
+        out = apply_transform_steps(loaded.df, request.steps)
+        diff = build_preview_diff(before=loaded.df, after=out.df, preview_rows=int(request.preview_rows))
+    except DatasetTransformError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    resp = DatasetTransformPreviewResponse(
+        **diff,
+        warnings=list(out.warnings or []),
+        metrics=to_jsonable(out.metrics or {}),
+    )
+    return APIResponse.success(data=resp, message="Preview computed")
+
+
+@router.post(
+    "/{dataset_id}/transform/apply",
+    response_model=APIResponse[DatasetTransformApplyResponse],
+    summary="Apply dataset transformation",
+    description="Create a new dataset version by applying a validated transformation pipeline (async).",
+)
+async def apply_dataset_transform(
+    dataset_id: UUID,
+    request: DatasetTransformApplyRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db_session),
+    user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS)),
+):
+    repo = DatasetRepository(db)
+    dataset = await repo.get_by_id(dataset_id)
+    if not dataset or dataset.owner_id != user.user_id:
+        raise DataNotFoundException("Dataset", dataset_id)
+
+    from app.models import DatasetStatus as ModelDatasetStatus
+
+    if dataset.status != ModelDatasetStatus.READY:
+        raise HTTPException(status_code=400, detail="Dataset must be processed (ready) before transforming")
+
+    from app.models import Job, JobStatus as ModelJobStatus, JobType as ModelJobType
+    from app.workers.dispatcher import enqueue_dataset_transform
+
+    payload = {
+        "dataset_id": str(dataset_id),
+        "steps": to_jsonable([s.model_dump() for s in request.steps]),
+        "label": request.label,
+        "set_as_current": bool(request.set_as_current),
+    }
+
+    job = Job(
+        owner_id=user.user_id,
+        dataset_id=dataset_id,
+        job_type=ModelJobType.DATASET_TRANSFORM,
+        status=ModelJobStatus.QUEUED,
+        progress=0.0,
+        status_message="Queued dataset transform",
+        payload=payload,
+        result={},
+    )
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+
+    enqueue_dataset_transform(background_tasks=background_tasks, dataset_id=dataset_id, job_id=job.id)
+
+    resp = DatasetTransformApplyResponse(
+        dataset_id=dataset_id,
+        job_id=job.id,
+        message="Dataset transformation queued",
+    )
+    return APIResponse.success(data=resp, meta={"job_id": str(job.id)})
