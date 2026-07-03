@@ -1,23 +1,100 @@
 'use client';
 
-import { useState } from 'react';
-import { IconUser, IconMail, IconLock, IconKey, IconShield, IconArrowRight } from '@/components/icons';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
+import { IconUser, IconKey, IconShield, IconArrowRight } from '@/components/icons';
+import api from '@/lib/api';
 import styles from './page.module.css';
 
 const tabs = [
     { id: 'profile', label: 'Profile', Icon: IconUser },
-    { id: 'api', label: 'API Keys', Icon: IconKey },
+    { id: 'billing', label: 'Billing', Icon: IconKey },
     { id: 'security', label: 'Security', Icon: IconShield },
 ];
 
 export default function SettingsPage() {
+    const searchParams = useSearchParams();
     const [activeTab, setActiveTab] = useState('profile');
+    const [loading, setLoading] = useState(true);
+    const [billingLoading, setBillingLoading] = useState(false);
+    const [profile, setProfile] = useState(null);
+    const [subscription, setSubscription] = useState(null);
+    const [error, setError] = useState(null);
+    const [billingNotice, setBillingNotice] = useState(null);
+
+    useEffect(() => {
+        const billing = searchParams.get('billing');
+        if (billing === 'success') {
+            setBillingNotice('Subscription updated successfully.');
+            setActiveTab('billing');
+        }
+    }, [searchParams]);
+
+    useEffect(() => {
+        const load = async () => {
+            try {
+                setLoading(true);
+                const [me, sub] = await Promise.all([
+                    api.getCurrentUser(),
+                    api.getSubscriptionStatus(),
+                ]);
+                setProfile(me);
+                setSubscription(sub);
+            } catch (e) {
+                setError(e?.message || 'Failed to load settings');
+            } finally {
+                setLoading(false);
+            }
+        };
+        load();
+    }, []);
+
+    const handleUpgrade = async (plan) => {
+        try {
+            setBillingLoading(true);
+            const session = await api.createCheckoutSession(plan);
+            if (session?.checkout_url) {
+                window.location.href = session.checkout_url;
+                return;
+            }
+            setError('Checkout is not configured on this deployment.');
+        } catch (e) {
+            setError(e?.message || 'Could not start checkout');
+        } finally {
+            setBillingLoading(false);
+        }
+    };
+
+    const handlePortal = async () => {
+        try {
+            setBillingLoading(true);
+            const portal = await api.openBillingPortal();
+            if (portal?.portal_url) {
+                window.location.href = portal.portal_url;
+            }
+        } catch (e) {
+            setError(e?.message || 'Billing portal unavailable');
+        } finally {
+            setBillingLoading(false);
+        }
+    };
+
+    if (loading) {
+        return <div className={styles.page}><p>Loading settings...</p></div>;
+    }
+
+    const plan = String(subscription?.plan || 'free');
+    const usage = subscription?.usage || {};
+    const limits = subscription?.limits || {};
+    const enforcement = Boolean(subscription?.enforcement_enabled);
 
     return (
         <div className={styles.page}>
             <h1 className={styles.title}>Settings</h1>
+            {error && <p className={styles.errorText}>{error}</p>}
+            {billingNotice && <p className={styles.noticeText}>{billingNotice}</p>}
 
-            {/* Tabs */}
             <div className={styles.tabs}>
                 {tabs.map((tab) => (
                     <button
@@ -31,103 +108,120 @@ export default function SettingsPage() {
                 ))}
             </div>
 
-            {/* Content */}
             <div className={styles.content}>
                 {activeTab === 'profile' && (
                     <div className={styles.section}>
-                        <h2 className={styles.sectionTitle}>Profile Information</h2>
-                        <form className={styles.form}>
+                        <h2 className={styles.sectionTitle}>Profile</h2>
+                        <div className={styles.form}>
                             <div className={styles.formGroup}>
-                                <label className={styles.label}>Full Name</label>
-                                <input type="text" defaultValue="John Doe" className={styles.input} />
+                                <label className={styles.label}>Email</label>
+                                <input type="email" value={profile?.email || ''} className={styles.input} readOnly />
                             </div>
                             <div className={styles.formGroup}>
-                                <label className={styles.label}>Email Address</label>
-                                <input type="email" defaultValue="john@company.com" className={styles.input} />
+                                <label className={styles.label}>Role</label>
+                                <input type="text" value={profile?.role || ''} className={styles.input} readOnly />
                             </div>
                             <div className={styles.formGroup}>
-                                <label className={styles.label}>Company</label>
-                                <input type="text" defaultValue="Acme Inc." className={styles.input} />
+                                <label className={styles.label}>Deployment</label>
+                                <input
+                                    type="text"
+                                    value={subscription?.deployment_mode || 'self_host'}
+                                    className={styles.input}
+                                    readOnly
+                                />
                             </div>
-                            <button type="submit" className={styles.saveBtn}>
-                                Save Changes
-                            </button>
-                        </form>
+                        </div>
                     </div>
                 )}
 
-                {activeTab === 'api' && (
+                {activeTab === 'billing' && (
                     <div className={styles.section}>
-                        <h2 className={styles.sectionTitle}>API Keys</h2>
+                        <h2 className={styles.sectionTitle}>Plan & Usage</h2>
                         <p className={styles.sectionDesc}>
-                            Configure your AI provider keys for BYOK mode.
+                            {enforcement
+                                ? 'Hosted SaaS mode: one free Talk-to-Your-Data preview, then upgrade or self-host.'
+                                : 'Self-host mode: no usage limits. You control keys and compute.'}
                         </p>
-                        <div className={styles.apiCards}>
-                            <div className={styles.apiCard}>
-                                <div className={styles.apiHeader}>
-                                    <span className={styles.apiName}>OpenAI</span>
-                                    <span className={styles.apiStatus}>Configured</span>
-                                </div>
-                                <p className={styles.apiKey}>sk-proj-****...****7x2K</p>
-                                <button className={styles.updateBtn}>Update Key</button>
+
+                        <div className={styles.billingCard}>
+                            <div className={styles.billingRow}>
+                                <span>Current plan</span>
+                                <strong>{plan.toUpperCase()}</strong>
                             </div>
-                            <div className={styles.apiCard}>
-                                <div className={styles.apiHeader}>
-                                    <span className={styles.apiName}>Google Gemini</span>
-                                    <span className={styles.apiStatusNot}>Not Configured</span>
-                                </div>
-                                <button className={styles.addBtn}>
-                                    <IconKey size={16} />
-                                    Add Key
+                            <div className={styles.billingRow}>
+                                <span>Preview sessions used</span>
+                                <strong>
+                                    {usage.talk_preview_used || 0}
+                                    {limits.talk_preview_sessions != null ? ` / ${limits.talk_preview_sessions}` : ''}
+                                </strong>
+                            </div>
+                            <div className={styles.billingRow}>
+                                <span>Monthly queries</span>
+                                <strong>
+                                    {usage.monthly_queries || 0}
+                                    {limits.monthly_queries != null ? ` / ${limits.monthly_queries}` : ' / unlimited'}
+                                </strong>
+                            </div>
+                        </div>
+
+                        <div className={styles.billingActions}>
+                            {plan === 'free' && enforcement && (
+                                <>
+                                    <button
+                                        type="button"
+                                        className={styles.saveBtn}
+                                        disabled={billingLoading}
+                                        onClick={() => handleUpgrade('pro')}
+                                    >
+                                        Upgrade to Pro
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={styles.actionBtn}
+                                        disabled={billingLoading}
+                                        onClick={() => handleUpgrade('enterprise')}
+                                    >
+                                        Upgrade to Enterprise
+                                    </button>
+                                </>
+                            )}
+                            {plan !== 'free' && subscription?.stripe_customer_id && (
+                                <button type="button" className={styles.actionBtn} disabled={billingLoading} onClick={handlePortal}>
+                                    Manage subscription
                                 </button>
-                            </div>
-                            <div className={styles.apiCard}>
-                                <div className={styles.apiHeader}>
-                                    <span className={styles.apiName}>Anthropic</span>
-                                    <span className={styles.apiStatusNot}>Not Configured</span>
-                                </div>
-                                <button className={styles.addBtn}>
-                                    <IconKey size={16} />
-                                    Add Key
-                                </button>
-                            </div>
+                            )}
+                            <Link href="/pricing" className={styles.linkBtn}>View pricing</Link>
+                            <a
+                                href={subscription?.self_host_url || 'https://github.com/Laxmi-Narasimha/neural-analyst'}
+                                className={styles.linkBtn}
+                                target="_blank"
+                                rel="noreferrer"
+                            >
+                                Self-host guide
+                            </a>
                         </div>
                     </div>
                 )}
 
                 {activeTab === 'security' && (
                     <div className={styles.section}>
-                        <h2 className={styles.sectionTitle}>Security Settings</h2>
+                        <h2 className={styles.sectionTitle}>Security</h2>
                         <div className={styles.securityItems}>
                             <div className={styles.securityItem}>
                                 <div className={styles.securityInfo}>
-                                    <h3>Change Password</h3>
-                                    <p>Update your account password</p>
+                                    <h3>Self-host for full control</h3>
+                                    <p>Run locally or on your cloud with your own API keys and data residency.</p>
                                 </div>
-                                <button className={styles.actionBtn}>
-                                    <IconLock size={16} />
-                                    Change
-                                </button>
-                            </div>
-                            <div className={styles.securityItem}>
-                                <div className={styles.securityInfo}>
-                                    <h3>Two-Factor Authentication</h3>
-                                    <p>Add an extra layer of security</p>
-                                </div>
-                                <button className={styles.actionBtn}>
-                                    <IconShield size={16} />
-                                    Enable
-                                </button>
-                            </div>
-                            <div className={styles.securityItem}>
-                                <div className={styles.securityInfo}>
-                                    <h3>Active Sessions</h3>
-                                    <p>Manage your logged-in devices</p>
-                                </div>
-                                <button className={styles.actionBtn}>
+                                <Link href="https://github.com/Laxmi-Narasimha/neural-analyst" className={styles.actionBtn}>
                                     <IconArrowRight size={16} />
-                                    View
-                                </button>
+                                    GitHub
+                                </Link>
+                            </div>
+                            <div className={styles.securityItem}>
+                                <div className={styles.securityInfo}>
+                                    <h3>Evidence-first analysis</h3>
+                                    <p>Dataset numbers always come from computed artifacts, not LLM guesses.</p>
+                                </div>
                             </div>
                         </div>
                     </div>

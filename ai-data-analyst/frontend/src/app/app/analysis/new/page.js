@@ -37,6 +37,7 @@ export default function NewAnalysisPage() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const datasetIdParam = searchParams.get('dataset');
+    const conversationParam = searchParams.get('conversation');
     const promptParam = searchParams.get('prompt');
     const autoSendParam = searchParams.get('autoSend');
     const actionParam = searchParams.get('action');
@@ -58,6 +59,8 @@ export default function NewAnalysisPage() {
     const [isLoading, setIsLoading] = useState(false);
     const [conversationId, setConversationId] = useState(null);
     const [runningAnalysis, setRunningAnalysis] = useState(null);
+    const [conversations, setConversations] = useState([]);
+    const [loadingConversations, setLoadingConversations] = useState(false);
     const messagesEndRef = useRef(null);
     const fileInputRef = useRef(null);
     const promptConsumedRef = useRef(false);
@@ -70,6 +73,50 @@ export default function NewAnalysisPage() {
     useEffect(() => {
         scrollToBottom();
     }, [messages]);
+
+    useEffect(() => {
+        const loadConversations = async () => {
+            try {
+                setLoadingConversations(true);
+                const { items } = await api.listConversations(1, 12);
+                setConversations(items || []);
+            } catch (e) {
+                console.error('Failed to load conversations', e);
+            } finally {
+                setLoadingConversations(false);
+            }
+        };
+        loadConversations();
+    }, [conversationId]);
+
+    useEffect(() => {
+        const convId = String(conversationParam || '').trim();
+        if (!convId || convId === conversationId) return;
+
+        const loadConversation = async () => {
+            try {
+                setIsLoading(true);
+                const data = await api.getConversation(convId);
+                setConversationId(convId);
+                if (data?.active_dataset_id) {
+                    setActiveDatasetId(String(data.active_dataset_id));
+                }
+                const restored = (data?.messages || []).map((m) => ({
+                    role: m.role,
+                    content: m.content,
+                    agentActions: m.agent_actions,
+                }));
+                if (restored.length) {
+                    setMessages(restored);
+                }
+            } catch (e) {
+                console.error('Failed to restore conversation', e);
+            } finally {
+                setIsLoading(false);
+            }
+        };
+        loadConversation();
+    }, [conversationParam]);
 
     const appendAssistantMessage = (response) => {
         const clarificationRequired = Boolean(response?.metadata?.clarification_required);
@@ -98,6 +145,9 @@ export default function NewAnalysisPage() {
 
             if (response.conversation_id) {
                 setConversationId(response.conversation_id);
+                router.replace(
+                    `/app/analysis/new?dataset=${activeDatasetId || ''}&conversation=${response.conversation_id}`
+                );
             }
 
             appendAssistantMessage(response);
@@ -332,6 +382,25 @@ export default function NewAnalysisPage() {
     return (
         <div className={styles.page}>
             <div className={styles.chatContainer}>
+                {conversations.length > 0 && (
+                    <div className={styles.conversationBar}>
+                        <span className={styles.conversationLabel}>
+                            {loadingConversations ? 'Loading chats...' : 'Recent conversations'}
+                        </span>
+                        <div className={styles.conversationList}>
+                            {conversations.map((c) => (
+                                <button
+                                    key={c.id}
+                                    type="button"
+                                    className={`${styles.conversationChip} ${String(conversationId) === String(c.id) ? styles.conversationChipActive : ''}`}
+                                    onClick={() => router.push(`/app/analysis/new?dataset=${c.active_dataset_id || activeDatasetId || ''}&conversation=${c.id}`)}
+                                >
+                                    {c.title || 'Conversation'}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
                 {/* Analysis Buttons */}
                 <div className={styles.analysisButtons}>
                     {analysisButtons.map((btn) => (

@@ -1,5 +1,4 @@
 services:
-  # ai-data-analyst backend (FastAPI)
   - type: web
     name: ai-data-analyst-backend
     env: docker
@@ -9,9 +8,13 @@ services:
     autoDeploy: true
     envVars:
       - key: ENVIRONMENT
-        value: development
+        value: production
       - key: DEBUG
         value: "false"
+      - key: DEPLOYMENT_MODE
+        value: saas
+      - key: AUTH_MODE
+        value: jwt
       - key: DB_MIGRATE_ON_STARTUP
         value: "true"
       - key: DB_AUTO_CREATE_TABLES
@@ -24,29 +27,18 @@ services:
         generateValue: true
       - key: OPENAI_API_KEY
         sync: false
-      - key: PINECONE_API_KEY
+      - key: STRIPE_SECRET_KEY
         sync: false
-
-  # ai-data-validator backend (FastAPI)
-  - type: web
-    name: ai-data-validator-backend
-    env: docker
-    rootDir: ai-data-validator/backend
-    dockerfilePath: Dockerfile
-    healthCheckPath: /health
-    autoDeploy: true
-    envVars:
-      - key: DEBUG
-        value: "false"
-      - key: OPENAI_API_KEY
+      - key: STRIPE_WEBHOOK_SECRET
         sync: false
-      - key: PINECONE_API_KEY
+      - key: STRIPE_PRICE_PRO
         sync: false
-      - key: PINECONE_ENVIRONMENT
+      - key: STRIPE_PRICE_ENTERPRISE
+        sync: false
+      - key: FRONTEND_URL
         sync: false
 
 databases:
   - name: ai-data-analyst-db
     databaseName: ai_data_analyst
     plan: free
-

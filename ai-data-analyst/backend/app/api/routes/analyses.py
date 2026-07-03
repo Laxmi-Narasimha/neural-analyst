@@ -281,6 +281,18 @@ async def create_analysis(
     user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS)),
 ):
     try:
+        from app.services.subscription_service import SubscriptionService, UsageAction
+
+        sub = SubscriptionService(db)
+        cfg = request.config if isinstance(request.config, dict) else {}
+        plan_steps = cfg.get("plan") if isinstance(cfg.get("plan"), list) else []
+        operators = [str(s.get("operator") or "") for s in plan_steps if isinstance(s, dict)]
+        await sub.assert_can_run(
+            user.user_id,
+            action=UsageAction.DATA_SPEAKS,
+            operators=operators or ["dataset_overview"],
+        )
+
         # Validate dataset ownership early.
         loader = DatasetLoaderService(db)
         await loader.get_dataset_record(request.dataset_id, owner_id=user.user_id, require_ready=False)
@@ -330,6 +342,12 @@ async def create_analysis(
         await repo.update(analysis)
 
         enqueue_compute_plan(background_tasks=background_tasks, analysis_id=analysis.id, job_id=job.id)
+
+        await sub.record_usage(
+            user.user_id,
+            action=UsageAction.DATA_SPEAKS,
+            operators=operators or ["dataset_overview"],
+        )
 
         return APIResponse.success(data=_analysis_to_response(analysis), message="Analysis created and queued")
     except BaseApplicationException as e:

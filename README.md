@@ -1,9 +1,9 @@
 # neural-analyst (monorepo)
 
-This repo contains two related apps:
+This repo is a **single product** (`ai-data-analyst/`) with optional legacy reference code.
 
-- `ai-data-analyst/`: FastAPI backend + Next.js frontend for dataset upload, "Data Speaks" (safe operators), and chat.
-- `ai-data-validator/`: FastAPI backend + Streamlit UI for "data adequacy" validation (uploads + Pinecone/OpenAI checks).
+- `ai-data-analyst/`: FastAPI + Next.js — Talk to Your Data, Data Speaks, Data Adequacy (merged validator), subscriptions (SaaS), self-host Docker.
+- `ai-data-validator/`: **Deprecated** — merged into `ai-data-analyst` at `/app/quality`. See `ai-data-validator/DEPRECATED.md`.
 
 ## Local Dev (Windows)
 
@@ -77,5 +77,6 @@ Object storage (optional):
 - `docs/GITHUB_WORKFLOW.md`: how to commit/push/PR safely (with explanations).
 - `docs/ROADMAP.md`: build sequence aligned to `spec_review/*`.
 - `docs/SETUP.md`: setup runbook (Windows + macOS).
+- `docs/DEPLOY_SAAS.md`: Cloudflare Pages + Render free-tier SaaS deployment.
 - `docs/LEVELS_AND_SEQUENCE.md`: "low/medium/expert/core" capability ladder + sequential build rule.
 - `spec_review/TALK_TO_YOUR_DATA_MASTER_SPEC.md`: spec pack entry point (product + engineering + security).

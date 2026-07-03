@@ -9,6 +9,7 @@ from typing import Generator
 import numpy as np
 import pandas as pd
 import pytest
+import pytest_asyncio
 
 # Add parent to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -238,6 +239,25 @@ def cluster_data():
     })
     labels = np.array([0] * 100 + [1] * 100 + [2] * 100)
     return data, labels
+
+
+# =============================================================================
+# Async DB session (for service-layer tests)
+# =============================================================================
+
+@pytest_asyncio.fixture
+async def db_session(tmp_path):
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app.models.database import Base
+
+    db_file = tmp_path / "pytest.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_file.as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        yield session
+    await engine.dispose()
 
 
 # =============================================================================

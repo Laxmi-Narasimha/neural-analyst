@@ -18,7 +18,7 @@ const navItems = [
     { href: '/app/data-speaks', label: 'Data Speaks', Icon: IconSparkles },
     { href: '/app/jobs', label: 'Jobs', Icon: IconTime },
     { href: '/app/reports', label: 'Reports', Icon: IconBook },
-    { href: '/app/quality', label: 'Data Quality', Icon: IconShield },
+    { href: '/app/quality', label: 'Data Adequacy', Icon: IconShield },
     { href: '/app/settings', label: 'Settings', Icon: IconSettings },
 ];
 

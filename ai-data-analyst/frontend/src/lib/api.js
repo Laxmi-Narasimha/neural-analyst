@@ -199,7 +199,8 @@ class APIClient {
     }
 
     async getConversation(conversationId) {
-        return this.request(`/chat/conversations/${conversationId}`);
+        const response = await this.request(`/chat/conversations/${conversationId}`);
+        return this._unwrapApiResponse(response);
     }
 
     async deleteConversation(conversationId) {
@@ -210,19 +211,41 @@ class APIClient {
     // Analytics APIs
     // ============================================================================
 
-    async runAnalysis(datasetId, analysisType, config = {}) {
-        return this.request('/analytics/run', {
-            method: 'POST',
-            body: JSON.stringify({
-                dataset_id: datasetId,
-                analysis_type: analysisType,
-                config,
-            }),
-        });
+    async runAnalysis(datasetId, analysisType = 'eda', config = {}) {
+        return this.createAnalysis(`${analysisType} analysis`, datasetId, analysisType, config);
     }
 
     async getAnalysisResult(analysisId) {
-        return this.request(`/analytics/${analysisId}`);
+        return this.getAnalysis(analysisId);
+    }
+
+    // ============================================================================
+    // Billing / Subscription APIs
+    // ============================================================================
+
+    async getSubscriptionStatus() {
+        const response = await this.request('/billing/status');
+        return this._unwrapApiResponse(response);
+    }
+
+    async createCheckoutSession(plan, options = {}) {
+        const response = await this.request('/billing/checkout', {
+            method: 'POST',
+            body: JSON.stringify({
+                plan,
+                success_url: options.successUrl,
+                cancel_url: options.cancelUrl,
+            }),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
+    async openBillingPortal(returnUrl = null) {
+        const response = await this.request('/billing/portal', {
+            method: 'POST',
+            body: JSON.stringify({ return_url: returnUrl }),
+        });
+        return this._unwrapApiResponse(response);
     }
 
     // ============================================================================
@@ -648,6 +671,10 @@ class APIClient {
         } finally {
             clearTokens();
         }
+    }
+
+    async getCurrentUser() {
+        return this.request('/auth/me');
     }
 }
 

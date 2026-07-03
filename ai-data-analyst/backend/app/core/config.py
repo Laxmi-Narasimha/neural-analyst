@@ -58,6 +58,40 @@ class AuthMode(str, Enum):
     JWT = "jwt"        # Full JWT authentication with registration/login
 
 
+class DeploymentMode(str, Enum):
+    """How the platform is deployed."""
+
+    SELF_HOST = "self_host"  # No SaaS limits; users bring keys + compute
+    SAAS = "saas"            # Hosted freemium + subscription enforcement
+
+
+class BillingConfig(BaseSettings):
+    """Stripe billing (optional for SaaS deployments)."""
+
+    model_config = SettingsConfigDict(env_prefix="BILLING_", env_file=".env", extra="ignore")
+
+    stripe_secret_key: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("STRIPE_SECRET_KEY", "BILLING_STRIPE_SECRET_KEY"),
+    )
+    stripe_webhook_secret: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias=AliasChoices("STRIPE_WEBHOOK_SECRET", "BILLING_STRIPE_WEBHOOK_SECRET"),
+    )
+    stripe_price_pro: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("STRIPE_PRICE_PRO", "BILLING_STRIPE_PRICE_PRO"),
+    )
+    stripe_price_enterprise: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("STRIPE_PRICE_ENTERPRISE", "BILLING_STRIPE_PRICE_ENTERPRISE"),
+    )
+    frontend_url: str = Field(
+        default="http://localhost:3000",
+        validation_alias=AliasChoices("FRONTEND_URL", "BILLING_FRONTEND_URL", "NEXT_PUBLIC_APP_URL"),
+    )
+
+
 class DatabaseConfig(BaseSettings):
     """Database configuration with connection pooling settings."""
     
@@ -421,6 +455,12 @@ class Settings(BaseSettings):
         description="Authentication mode: local (no login, auto-user) or jwt (full auth)",
     )
 
+    deployment_mode: DeploymentMode = Field(
+        default=DeploymentMode.SELF_HOST,
+        validation_alias=AliasChoices("DEPLOYMENT_MODE", "PLATFORM_MODE"),
+        description="self_host = unlimited local OSS; saas = freemium + subscription limits",
+    )
+
     # LLM provider-agnostic model setting
     llm_model: str = Field(
         default="gpt-4o-mini",
@@ -458,6 +498,7 @@ class Settings(BaseSettings):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     ml: MLConfig = Field(default_factory=MLConfig)
     narrator: NarratorConfig = Field(default_factory=NarratorConfig)
+    billing: BillingConfig = Field(default_factory=BillingConfig)
     
     @field_validator("upload_directory", "artifact_directory")
     @classmethod

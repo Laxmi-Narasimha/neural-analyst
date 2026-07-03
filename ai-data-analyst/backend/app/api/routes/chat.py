@@ -30,6 +30,7 @@ from app.compute.plans import eda_p0_plan
 from app.services.database import get_db_session
 from app.services.dataset_loader import DatasetLoaderService
 from app.services.llm_service import get_llm_service, Message as LLMMessage
+from app.services.subscription_service import SubscriptionService, UsageAction
 from app.api.routes.auth import require_permission
 from app.services.auth_service import AuthUser, Permission
 
@@ -205,6 +206,61 @@ class ChatService:
         self.dataset_loader = DatasetLoaderService(session)
         self.llm = get_llm_service()
         self.user_id = user_id
+        self.subscription = SubscriptionService(session)
+
+    def _merge_recent_user_messages(self, messages: list[Any], current: str, *, limit: int = 4) -> str:
+        snippets: list[str] = []
+        for msg in reversed(messages or []):
+            role = str(getattr(msg, "role", "") or "").lower()
+            if role != "user":
+                continue
+            text = str(getattr(msg, "content", "") or "").strip()
+            if text:
+                snippets.append(text)
+            if len(snippets) >= limit:
+                break
+        snippets.reverse()
+        if not snippets:
+            return current
+        if snippets[-1] == current:
+            snippets = snippets[:-1]
+        if not snippets:
+            return current
+        return " | ".join(snippets[-3:] + [current])
+
+    async def _persist_turn_memory(
+        self,
+        conversation: Any,
+        *,
+        user_message: str,
+        operators: list[str],
+        dataset_record: Any | None,
+    ) -> None:
+        conv_ctx_raw = conversation.context if isinstance(getattr(conversation, "context", None), dict) else {}
+        conv_ctx: dict[str, Any] = dict(conv_ctx_raw or {})
+        history = conv_ctx.get("turn_history")
+        if not isinstance(history, list):
+            history = []
+        history.append(
+            {
+                "user": user_message[:500],
+                "operators": operators[:12],
+                "at": datetime.utcnow().isoformat(),
+            }
+        )
+        conv_ctx["turn_history"] = history[-20:]
+        if dataset_record is not None:
+            schema_info = getattr(dataset_record, "schema_info", None) or {}
+            cols = schema_info.get("columns") if isinstance(schema_info, dict) else []
+            col_names = [str(c.get("name")) for c in cols if isinstance(c, dict) and c.get("name")][:40]
+            conv_ctx["dataset_memory"] = {
+                "dataset_id": str(getattr(dataset_record, "id", "")),
+                "row_count": getattr(dataset_record, "row_count", None),
+                "column_count": getattr(dataset_record, "column_count", None),
+                "columns": col_names,
+            }
+        conversation.context = conv_ctx
+        await self._session.commit()
     
     async def chat(
         self,
@@ -375,6 +431,17 @@ class ChatService:
                         },
                     )
 
+            operator_names = [str(step.get("operator") or "") for step in plan if isinstance(step, dict)]
+            gate = await self.subscription.assert_can_run(
+                self.user_id,
+                action=UsageAction.TALK_PREVIEW,
+                operators=operator_names,
+            )
+            plan = self.subscription.filter_plan_for_free(
+                plan,
+                preview_only=bool(gate.get("preview_only")),
+            )
+
             sample_rows = 200_000
             results = await self.executor.run_plan(
                 dataset_id=active_dataset_id,
@@ -410,6 +477,18 @@ class ChatService:
                 agent_actions=agent_actions,
             )
 
+            await self.subscription.record_usage(
+                self.user_id,
+                action=UsageAction.TALK_PREVIEW,
+                operators=operator_names,
+            )
+            await self._persist_turn_memory(
+                conversation,
+                user_message=effective_message,
+                operators=operator_names,
+                dataset_record=dataset_record,
+            )
+
             return ChatResponse(
                 conversation_id=conversation.id,
                 message_id=assistant_msg.id,
@@ -421,6 +500,8 @@ class ChatService:
                 metadata={
                     "dataset_id": str(active_dataset_id),
                     "sample_rows": sample_rows,
+                    "plan": gate.get("plan"),
+                    "preview_only": gate.get("preview_only", False),
                 },
             )
 
