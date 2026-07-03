@@ -505,6 +505,31 @@ class ChatService:
                 },
             )
 
+        # No dataset: block data-analysis intents from LLM hallucination (reuse router keywords).
+        data_plan = self._select_plan(message, dataset_record=None)
+        if data_plan:
+            content = (
+                "I don't have a dataset attached to this conversation yet. "
+                "Upload or select a dataset from **Datasets**, then ask your question again.\n\n"
+                "I only run compute-backed analysis when a dataset is linked — "
+                "I won't guess row counts or statistics without one."
+            )
+            assistant_msg = await self.repo.add_message(
+                conversation_id=conversation.id,
+                role=MessageRole.ASSISTANT.value,
+                content=content,
+                agent_actions=[],
+            )
+            return ChatResponse(
+                conversation_id=conversation.id,
+                message_id=assistant_msg.id,
+                content=content,
+                role=MessageRole.ASSISTANT,
+                agent_actions=[],
+                suggestions=["Upload a dataset", "Open Datasets", "Run Data Speaks (EDA)"],
+                metadata={"no_dataset": True, "blocked_plan": data_plan},
+            )
+
         # Otherwise, fall back to an LLM-only assistant (no dataset context).
         messages = await self.repo.get_messages(conversation.id, limit=20)
         llm_messages = self._build_llm_messages(messages, None, context)

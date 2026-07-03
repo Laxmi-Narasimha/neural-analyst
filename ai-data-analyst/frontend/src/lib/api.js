@@ -674,7 +674,8 @@ class APIClient {
     }
 
     async getCurrentUser() {
-        return this.request('/auth/me');
+        const response = await this.request('/auth/me');
+        return this._unwrapApiResponse(response);
     }
 }
 

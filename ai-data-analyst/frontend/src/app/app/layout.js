@@ -7,7 +7,8 @@ import {
     IconDashboard, IconDatabase, IconChart, IconSettings,
     IconPlus, IconSearch, IconUser, IconArrowRight, IconServer, IconShield, IconSparkles, IconTime, IconBook
 } from '@/components/icons';
-import { getAccessToken } from '@/lib/auth';
+import { clearTokens, getAccessToken } from '@/lib/auth';
+import api from '@/lib/api';
 import styles from './layout.module.css';
 
 const navItems = [
@@ -27,6 +28,9 @@ export default function AppLayout({ children }) {
     const pathname = usePathname();
     const [sidebarOpen, setSidebarOpen] = useState(true);
     const [authReady, setAuthReady] = useState(false);
+    const [userMenuOpen, setUserMenuOpen] = useState(false);
+    const [currentUser, setCurrentUser] = useState(null);
+    const [loggingOut, setLoggingOut] = useState(false);
 
     useEffect(() => {
         const token = getAccessToken();
@@ -35,7 +39,23 @@ export default function AppLayout({ children }) {
             return;
         }
         setAuthReady(true);
+        api.getCurrentUser()
+            .then((res) => setCurrentUser(res?.data || res))
+            .catch(() => setCurrentUser(null));
     }, [router]);
+
+    const handleLogout = async () => {
+        setLoggingOut(true);
+        try {
+            await api.logout();
+        } catch {
+            clearTokens();
+        } finally {
+            setLoggingOut(false);
+            setUserMenuOpen(false);
+            router.replace('/login');
+        }
+    };
 
     if (!authReady) {
         return (
@@ -112,9 +132,39 @@ export default function AppLayout({ children }) {
                         />
                     </div>
                     <div className={styles.userSection}>
-                        <button className={styles.userBtn}>
+                        <button
+                            className={styles.userBtn}
+                            type="button"
+                            aria-label="User menu"
+                            aria-expanded={userMenuOpen}
+                            onClick={() => setUserMenuOpen((open) => !open)}
+                        >
                             <IconUser size={18} />
                         </button>
+                        {userMenuOpen && (
+                            <div className={styles.userMenu} role="menu">
+                                <div className={styles.userMenuHeader}>
+                                    {currentUser?.full_name || currentUser?.email || 'Signed in'}
+                                </div>
+                                <Link
+                                    href="/app/settings"
+                                    className={styles.userMenuItem}
+                                    role="menuitem"
+                                    onClick={() => setUserMenuOpen(false)}
+                                >
+                                    Settings
+                                </Link>
+                                <button
+                                    className={styles.userMenuItem}
+                                    type="button"
+                                    role="menuitem"
+                                    onClick={handleLogout}
+                                    disabled={loggingOut}
+                                >
+                                    {loggingOut ? 'Signing out…' : 'Sign out'}
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </header>
 
