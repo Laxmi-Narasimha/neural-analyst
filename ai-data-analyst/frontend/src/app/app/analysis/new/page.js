@@ -71,30 +71,36 @@ export default function NewAnalysisPage() {
         scrollToBottom();
     }, [messages]);
 
-    const sendChatMessage = async (userMessage) => {
+    const appendAssistantMessage = (response) => {
+        const clarificationRequired = Boolean(response?.metadata?.clarification_required);
+        setMessages((prev) => [
+            ...prev,
+            {
+                role: 'assistant',
+                content: response.content || 'I could not compute an answer for that yet.',
+                suggestions: response.suggestions,
+                agentActions: response.agent_actions,
+                clarification: clarificationRequired ? response.clarification : null,
+            },
+        ]);
+    };
+
+    const sendChatMessage = async (userMessage, { context = {}, displayMessage = null } = {}) => {
         const text = String(userMessage || '').trim();
         if (!text || isLoading) return;
 
         setInput('');
-        setMessages((prev) => [...prev, { role: 'user', content: text }]);
+        setMessages((prev) => [...prev, { role: 'user', content: displayMessage || text }]);
         setIsLoading(true);
 
         try {
-            const response = await api.sendMessage(text, conversationId, activeDatasetId);
+            const response = await api.sendMessage(text, conversationId, activeDatasetId, context);
 
             if (response.conversation_id) {
                 setConversationId(response.conversation_id);
             }
 
-            setMessages((prev) => [
-                ...prev,
-                {
-                    role: 'assistant',
-                    content: response.content || 'I could not compute an answer for that yet.',
-                    suggestions: response.suggestions,
-                    agentActions: response.agent_actions,
-                },
-            ]);
+            appendAssistantMessage(response);
         } catch (error) {
             console.error('Chat error:', error);
             setMessages((prev) => [
@@ -107,6 +113,24 @@ export default function NewAnalysisPage() {
         } finally {
             setIsLoading(false);
         }
+    };
+
+    const handleClarificationSelect = async (clarification, option) => {
+        if (!clarification || isLoading) return;
+
+        const answer = String(option?.value || option?.label || '').trim();
+        if (!answer) return;
+
+        const label = String(option?.label || option?.value || answer);
+        await sendChatMessage(answer, {
+            displayMessage: label,
+            context: {
+                clarification: {
+                    question_id: clarification.question_id,
+                    answer,
+                },
+            },
+        });
     };
 
     const handleSubmit = async (e) => {
@@ -340,7 +364,41 @@ export default function NewAnalysisPage() {
                                 </div>
                             )}
                             <div className={styles.messageContent}>
-                                {message.content}
+                                <div className={styles.messageText}>{message.content}</div>
+                                {Array.isArray(message.clarification?.options) && message.clarification.options.length > 0 && (
+                                    <div className={styles.clarificationOptions}>
+                                        {message.clarification.options.map((option, optionIndex) => {
+                                            const label = option?.label || option?.value || `Option ${optionIndex + 1}`;
+                                            return (
+                                                <button
+                                                    key={`${message.clarification.question_id || 'clarify'}-${optionIndex}`}
+                                                    type="button"
+                                                    className={styles.clarificationBtn}
+                                                    onClick={() => handleClarificationSelect(message.clarification, option)}
+                                                    disabled={isLoading}
+                                                >
+                                                    <span className={styles.clarificationIndex}>{optionIndex + 1}</span>
+                                                    {label}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                                {Array.isArray(message.suggestions) && message.suggestions.length > 0 && (
+                                    <div className={styles.messageSuggestions}>
+                                        {message.suggestions.map((suggestion, suggestionIndex) => (
+                                            <button
+                                                key={`${index}-suggestion-${suggestionIndex}`}
+                                                type="button"
+                                                className={styles.suggestionBtn}
+                                                onClick={() => handleSuggestionClick(suggestion)}
+                                                disabled={isLoading}
+                                            >
+                                                {suggestion}
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                         </div>
                     ))}
