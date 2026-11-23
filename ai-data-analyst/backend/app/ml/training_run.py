@@ -126,6 +126,9 @@ def run_training(
 ) -> TrainingRun:
     if target_column not in df.columns:
         raise ValueError(f"Target column '{target_column}' not found")
+    df, target_column, time_column, exclude_columns, _ = AdvancedAutoMLEngine._normalise_frame(
+        df, target_column, time_column, exclude_columns
+    )
     chosen_time, notes = resolve_split_time_column(
         df, target_column=target_column, time_column=time_column, split=split
     )

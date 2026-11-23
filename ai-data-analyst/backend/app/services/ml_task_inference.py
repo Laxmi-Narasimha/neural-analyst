@@ -102,17 +102,22 @@ def resolve_split_time_column(
         return time_column, notes
     if str(split or "auto").strip().lower() in {"random", "random_split", "shuffle"}:
         return None, notes
-    candidates = [c for c in _detect_time_columns(df) if c != target_column]
-    if not candidates:
-        return None, notes
+    from app.ml.tabular_pipeline import _looks_like_dates, parse_datetime
+
     medians: dict[str, pd.Timestamp] = {}
-    for c in candidates:
+    for c in df.columns:
+        if c == target_column:
+            continue
+        s = df[c]
+        if not pd.api.types.is_datetime64_any_dtype(s):
+            if s.dtype != object or not _looks_like_dates(s.dropna(), str(c)):
+                continue
         try:
-            parsed = pd.to_datetime(df[c], errors="coerce", utc=True, format="mixed")
+            parsed = parse_datetime(s)
         except Exception:
             continue
-        if parsed.notna().mean() >= 0.6:
-            medians[c] = parsed.median()
+        if parsed.notna().mean() >= 0.6 and parsed.nunique() > 1:
+            medians[str(c)] = parsed.median()
     if not medians:
         return None, notes
     chosen = min(medians, key=lambda c: medians[c])

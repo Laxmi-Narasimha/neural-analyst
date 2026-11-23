@@ -634,9 +634,16 @@ class AdvancedAutoMLEngine:
             raise MLException(f"Time column '{time_column}' not found in dataframe")
         if time_column == target_column:
             raise MLException("The time column cannot also be the target")
+        df, target_column, time_column, exclude_columns, name_notes = self._normalise_frame(
+            df, target_column, time_column, exclude_columns
+        )
+        run_warnings.extend(name_notes)
         self._target_column = target_column
 
-        # Step 1: never impute the target.
+        # Step 1: understand the target values, then never impute them.
+        target_series, target_notes = self._clean_target(df[target_column], task)
+        run_warnings.extend(target_notes)
+        df = df.assign(**{target_column: target_series})
         known = df[target_column].notna()
         n_missing_target = int((~known).sum())
         data = df.loc[known]
@@ -679,6 +686,20 @@ class AdvancedAutoMLEngine:
         exclude = set(exclude_columns or []) | {target_column}
         feature_cols = [c for c in data.columns if c not in exclude]
         leakage = self._screen_leakage(data[feature_cols], data[target_column], task)
+        if time_column is not None:
+            leakage.extend(
+                self._probe_post_event_dates(
+                    data, feature_cols, target_column, time_column, task,
+                    already={i["column"] for i in leakage},
+                )
+            )
+        flagged = [i for i in leakage if i.get("action") == "flag"]
+        leakage = [i for i in leakage if i.get("action") != "flag"]
+        if flagged:
+            run_warnings.append(
+                "Kept, but check these are known at prediction time: "
+                + "; ".join(f"{i['column']} ({i['reason']})" for i in flagged)
+            )
         if leakage:
             names = [item["column"] for item in leakage]
             if self.exclude_leaky_columns:
@@ -930,18 +951,172 @@ class AdvancedAutoMLEngine:
         if pd.api.types.is_bool_dtype(target_clean):
             return MLTask.BINARY_CLASSIFICATION
         if pd.api.types.is_numeric_dtype(target_clean):
-            n_unique = target_clean.nunique()
+            values = target_clean.astype(float)
+            n_unique = int(values.nunique())
             if n_unique == 2:
                 return MLTask.BINARY_CLASSIFICATION
-            if n_unique <= 10 and n_unique / len(target_clean) < 0.05:
-                return MLTask.MULTICLASS_CLASSIFICATION
-            if n_unique <= 20 and all(float(x).is_integer() for x in target_clean.head(100)):
-                return MLTask.MULTICLASS_CLASSIFICATION
+            is_integer = bool(np.all(np.mod(values, 1) == 0))
+            # Small sets of non-negative, near-consecutive integers are codes or
+            # ratings (0-4, 1-5); spread-out integers (-500, -400 ... 500) are amounts.
+            if is_integer and n_unique <= 15 and values.min() >= 0:
+                if (values.max() - values.min() + 1) <= 1.5 * n_unique:
+                    return MLTask.MULTICLASS_CLASSIFICATION
             return MLTask.REGRESSION
         n_unique = target_clean.nunique()
         if n_unique == 2:
             return MLTask.BINARY_CLASSIFICATION
         return MLTask.MULTICLASS_CLASSIFICATION
+
+    @staticmethod
+    def _normalise_frame(
+        df: pd.DataFrame,
+        target_column: str,
+        time_column: Optional[str],
+        exclude_columns: Optional[List[str]],
+    ) -> Tuple[pd.DataFrame, str, Optional[str], Optional[List[str]], List[str]]:
+        """String, unique column names and flattened nested cells."""
+        from app.ml.tabular_pipeline import dedupe_column_names, normalise_cells
+
+        notes: List[str] = []
+        original = list(df.columns)
+        names = dedupe_column_names(original)
+        renamed = [(str(o), n) for o, n in zip(original, names) if str(o) != n]
+        if renamed:
+            notes.append(
+                "Renamed duplicate or blank column names: "
+                + ", ".join(f"'{o}' -> '{n}'" for o, n in renamed[:10])
+            )
+        first_name = {}
+        for o, n in zip(original, names):
+            first_name.setdefault(o, n)
+        out = df.copy()
+        out.columns = names
+        for col in out.columns:
+            if out[col].dtype == object:
+                out[col] = normalise_cells(out[col])
+
+        def mapped(c: Optional[str]) -> Optional[str]:
+            return None if c is None else first_name.get(c, str(c))
+
+        excl = [mapped(c) for c in exclude_columns] if exclude_columns else exclude_columns
+        return out, mapped(target_column), mapped(time_column), excl, notes
+
+    def _clean_target(self, target: pd.Series, task: Optional[MLTask]) -> Tuple[pd.Series, List[str]]:
+        """Read numbers stored as text and merge label spellings that differ only in case/spacing."""
+        from app.ml.tabular_pipeline import _clean_numeric_text
+
+        notes: List[str] = []
+        s = target
+        if s.dtype == object or pd.api.types.is_string_dtype(s) or isinstance(s.dtype, pd.CategoricalDtype):
+            s = s.astype("object")
+            text = s.where(s.notna(), None)
+            stripped = text.map(lambda v: v.strip() if isinstance(v, str) else v)
+            stripped = stripped.where(stripped != "", None)
+            non_null = stripped.dropna()
+            if task in (None, MLTask.REGRESSION) and len(non_null):
+                as_numbers = _clean_numeric_text(non_null.astype(str))
+                if float(as_numbers.notna().mean()) >= 0.98 and as_numbers.nunique() > 2:
+                    numbers = _clean_numeric_text(stripped.astype("string"))
+                    notes.append(
+                        f"Read '{target.name}' as numbers (removed currency symbols, separators and % signs)."
+                    )
+                    return numbers, notes
+            folded = non_null.astype(str).str.casefold()
+            if folded.nunique() < non_null.astype(str).nunique():
+                canonical = (
+                    pd.DataFrame({"raw": non_null.astype(str), "key": folded})
+                    .groupby("key")["raw"]
+                    .agg(lambda v: v.value_counts().index[0])
+                )
+                merged = stripped.map(lambda v: canonical[str(v).casefold()] if isinstance(v, str) else v)
+                groups = (
+                    pd.DataFrame({"raw": target.dropna().astype(str), "key": target.dropna().astype(str).str.strip().str.casefold()})
+                    .groupby("key")["raw"]
+                    .agg(lambda v: sorted(set(v)))
+                )
+                variants = [f"{canonical[k]} <- {g}" for k, g in groups.items() if len(g) > 1]
+                notes.append(
+                    f"Merged '{target.name}' labels that differ only in case or spacing: " + "; ".join(variants[:5])
+                )
+                return merged, notes
+            if not stripped.equals(text):
+                return stripped, notes
+            return text, notes
+        if pd.api.types.is_numeric_dtype(s):
+            values = s.astype(float)
+            n_inf = int(np.isinf(values).sum())
+            if n_inf:
+                notes.append(f"Treated {n_inf:,} infinite target values as missing.")
+                return s.where(np.isfinite(values), np.nan), notes
+        return s, notes
+
+    def _probe_post_event_dates(
+        self,
+        data: pd.DataFrame,
+        feature_cols: List[str],
+        target_column: str,
+        time_column: str,
+        task: MLTask,
+        already: set,
+    ) -> List[Dict[str, str]]:
+        """Exclude date columns recorded after the prediction moment that reveal the outcome.
+
+        For each other date column D whose values fall after the time column T, the
+        gap D - T is the kind of quantity that is only known once the outcome has
+        happened (delivery took 9 days, so it was late). If that gap alone predicts
+        the target almost perfectly in cross-validation, D is excluded.
+        """
+        from app.ml.tabular_pipeline import parse_datetime
+        from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+
+        findings: List[Dict[str, str]] = []
+        t0 = parse_datetime(data[time_column])
+        y_raw = data[target_column]
+        for col in feature_cols:
+            if col in already or col == time_column:
+                continue
+            s = data[col]
+            if not (pd.api.types.is_datetime64_any_dtype(s) or s.dtype == object):
+                continue
+            parsed = parse_datetime(s) if not pd.api.types.is_datetime64_any_dtype(s) else s
+            valid = parsed.notna() & t0.notna()
+            if valid.mean() < 0.6 or int(valid.sum()) < 30:
+                continue
+            gap = (parsed[valid] - t0[valid]).dt.total_seconds() / 86400.0
+            if float((gap >= 0).mean()) < 0.9:
+                continue  # not recorded after the time column
+            y = y_raw[valid]
+            Xg = gap.to_numpy().reshape(-1, 1)
+            try:
+                if task in _CLASSIFICATION_TASKS:
+                    yc = pd.factorize(y.astype(str))[0]
+                    if np.bincount(yc).min() < 3:
+                        continue
+                    scores = cross_val_score(
+                        DecisionTreeClassifier(max_depth=3, random_state=self.random_state), Xg, yc,
+                        cv=StratifiedKFold(3, shuffle=True, random_state=self.random_state),
+                        scoring="balanced_accuracy",
+                    )
+                else:
+                    scores = cross_val_score(
+                        DecisionTreeRegressor(max_depth=3, random_state=self.random_state), Xg,
+                        pd.to_numeric(y, errors="coerce").to_numpy(),
+                        cv=KFold(3, shuffle=True, random_state=self.random_state), scoring="r2",
+                    )
+            except Exception:
+                continue
+            score = float(np.nanmean(scores))
+            if score >= 0.95:
+                findings.append(
+                    {
+                        "column": str(col),
+                        "reason": (
+                            f"recorded after '{time_column}', and the gap between them alone predicts the target "
+                            f"(cross-validated score {score:.2f}), so it is only known once the outcome has happened"
+                        ),
+                    }
+                )
+        return findings
 
     def _normalise_task(self, task: MLTask, target: pd.Series) -> MLTask:
         if task in _CLASSIFICATION_TASKS:
@@ -1000,9 +1175,18 @@ class AdvancedAutoMLEngine:
                             continue
                 if task == MLTask.REGRESSION and pd.api.types.is_numeric_dtype(s_known):
                     corr = float(pd.to_numeric(t_known, errors="coerce").corr(s_known.astype(float)))
-                    if np.isfinite(corr) and abs(corr) >= 0.995:
+                    if np.isfinite(corr) and abs(corr) >= 0.9999:
+                        # An exact linear rescaling (unit or currency conversion, a copy).
                         findings.append(
-                            {"column": str(col), "reason": f"correlation with the target is {corr:.3f}"}
+                            {"column": str(col), "reason": f"it is a linear rescaling of the target (r = {corr:.5f})"}
+                        )
+                    elif np.isfinite(corr) and abs(corr) >= 0.99:
+                        findings.append(
+                            {
+                                "column": str(col),
+                                "reason": f"correlation with the target is {corr:.3f}; confirm it is known before the outcome",
+                                "action": "flag",
+                            }
                         )
             except Exception:
                 continue
@@ -1310,8 +1494,10 @@ class AdvancedAutoMLEngine:
         """Drop in the selection metric when each input column is shuffled."""
         if len(X_test) < 10:
             return {}, "Feature importance was skipped because the held-out split has fewer than 10 rows."
-        if len(X_test) > 2000:
-            idx = np.random.default_rng(self.random_state).choice(len(X_test), 2000, replace=False)
+        max_rows = 2000 if X_test.shape[1] <= 50 else 800
+        n_repeats = 5 if X_test.shape[1] <= 30 else 2
+        if len(X_test) > max_rows:
+            idx = np.random.default_rng(self.random_state).choice(len(X_test), max_rows, replace=False)
             X_eval, y_eval = X_test.iloc[np.sort(idx)], y_test[np.sort(idx)]
         else:
             X_eval, y_eval = X_test, y_test
@@ -1322,7 +1508,7 @@ class AdvancedAutoMLEngine:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 imp = permutation_importance(
-                    pipe, X_eval, y_eval, scoring=metric, n_repeats=5,
+                    pipe, X_eval, y_eval, scoring=metric, n_repeats=n_repeats,
                     random_state=self.random_state, n_jobs=self.n_jobs,
                 )
         except Exception as e:
