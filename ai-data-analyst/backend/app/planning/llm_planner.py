@@ -18,7 +18,7 @@ from typing import Any, Optional
 
 from app.core.logging import get_logger
 from app.planning.catalog import catalog_for_prompt, column_kind
-from app.planning.validator import validate_plan
+from app.planning.validator import validate_filters, validate_plan
 
 logger = get_logger(__name__)
 
@@ -34,10 +34,19 @@ Rules:
 1. Use only operators from OPERATORS and only column names that appear in COLUMNS, spelled exactly.
 2. Respect column types: numeric parameters need numeric columns, time parameters need datetime columns.
 3. Prefer the single most direct operator. Use at most 4 steps, and only when each is needed.
-4. Row filters (where region = West, in Q1 2026, top customers only, excluding returns) are applied by
-   another component BEFORE your plan runs. Text that was already turned into filters has been removed
-   from QUESTION. If QUESTION still contains a restriction on which rows count that no operator
-   parameter can express, list it in "unhandled_restrictions" - never ignore it.
+4. Row filters restrict which rows count (where region = West, in Q1 2026, excluding returns).
+   ORIGINAL_MESSAGE is what the user typed. A rule parser already extracted DETECTED_FILTERS from it
+   (numbered from 0) and removed their text from QUESTION. The parser can be wrong: phrases like
+   "brings in the most money" are not filters. Return "keep_detected_filters" with the indices of the
+   detected filters that are real restrictions, and put any restriction it missed in "filters" using
+   explicit COLUMNS names:
+     {"column": C, "op": "eq"|"ne"|"in"|"not_in"|"gt"|"ge"|"lt"|"le", "value": V}   (in/not_in: list)
+     {"column": C, "op": "date", "start": "YYYY-MM-DD" or null, "end": "YYYY-MM-DD" or null}  (end exclusive)
+     {"column": C, "op": "null"|"present"}
+     {"op": "and"|"or", "children": [...]}
+   Use values exactly as they appear in the data examples. Resolve relative dates against TODAY.
+   If a restriction cannot be written this way (e.g. "repeat customers" with no such column), list it
+   in "unhandled_restrictions" - never ignore it.
 5. If the question is ambiguous between columns (e.g. two date columns or two plausible measures),
    return status "clarify" with a short question and the candidate column names as options.
 6. If no combination of operators answers the question, return status "unsupported" with a reason.
@@ -47,6 +56,8 @@ Respond with ONE JSON object and nothing else:
 {"status": "plan" | "clarify" | "unsupported",
  "steps": [{"operator": "<name>", "params": {...}}],
  "clarification": {"question": "...", "options": ["..."]},
+ "keep_detected_filters": [0],
+ "filters": [],
  "unhandled_restrictions": ["..."],
  "reason": "one sentence on why this plan answers the question"}"""
 
@@ -60,6 +71,9 @@ class PlannerOutcome:
     reason: str = ""
     notes: list[str] = field(default_factory=list)
     attempts: int = 0
+    filters: list[dict[str, Any]] = field(default_factory=list)
+    # Indices of rule-detected filters to keep; None keeps them all.
+    keep_detected: Optional[list[int]] = None
 
 
 def planner_enabled() -> bool:
@@ -116,10 +130,15 @@ def _extract_json(text: str) -> Optional[dict[str, Any]]:
 
 
 def _user_prompt(question: str, schema: dict[str, Any] | None, context: dict[str, Any] | None) -> str:
+    ctx = context or {}
     payload = {
         "OPERATORS": catalog_for_prompt(),
         "COLUMNS": describe_columns(schema),
-        "PREVIOUS_PLAN": (context or {}).get("previous_steps") or [],
+        "TODAY": str(ctx.get("today") or ""),
+        "PREVIOUS_PLAN": ctx.get("previous_steps") or [],
+        "ACTIVE_FILTERS_FROM_EARLIER_TURNS": ctx.get("active_filters") or [],
+        "DETECTED_FILTERS": ctx.get("detected_filters") or [],
+        "ORIGINAL_MESSAGE": ctx.get("original_message") or question,
         "QUESTION": question,
     }
     return json.dumps(payload, ensure_ascii=False, default=str)
@@ -183,15 +202,28 @@ async def plan_question(
                     attempts=attempt + 1,
                 )
             result = validate_plan(data.get("steps"), schema)
-            if result.ok:
+            filters, filter_issues = validate_filters(data.get("filters") or [], schema)
+            n_detected = len((context or {}).get("detected_filters") or [])
+            keep_raw = data.get("keep_detected_filters")
+            keep: Optional[list[int]] = None
+            keep_issues: list[str] = []
+            if keep_raw is not None:
+                if not isinstance(keep_raw, list) or not all(isinstance(i, int) and 0 <= i < n_detected for i in keep_raw):
+                    keep_issues.append(f"keep_detected_filters must list indices between 0 and {n_detected - 1}")
+                else:
+                    keep = sorted(set(keep_raw))
+            issues = result.issues + filter_issues + keep_issues
+            if result.ok and not issues:
                 return PlannerOutcome(
                     status="plan",
                     steps=result.steps,
                     reason=str(data.get("reason") or ""),
                     notes=result.notes,
                     attempts=attempt + 1,
+                    filters=filters,
+                    keep_detected=keep,
                 )
-            problem = "The plan failed validation: " + "; ".join(result.issues)
+            problem = "The plan failed validation: " + "; ".join(issues)
         messages = messages + [
             Message(role="assistant", content=content[:4000]),
             Message(

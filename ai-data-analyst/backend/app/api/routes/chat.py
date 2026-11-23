@@ -525,7 +525,7 @@ class ChatService:
                         if edit.clear and any(s["operator"].startswith("ml_") for s in plan):
                             plan = [{"operator": "dataset_overview", "params": {}}]
                 if not plan and edit.question:
-                    plan, planner_note = await self._plan_with_llm(edit.question, schema, last)
+                    plan, planner_note = await self._plan_with_llm(edit, effective_message, schema, last)
                 if not plan:
                     raise ScopeQuestion("I couldn't match the complete question to a supported calculation. Specify the measurement or comparison and its conditions.")
                 if sheets and sheets != last.get("worksheets") and last:
@@ -1235,9 +1235,14 @@ class ChatService:
         return None
 
     async def _plan_with_llm(
-        self, question: str, schema: dict[str, Any], last: dict[str, Any]
+        self, edit: ScopeEdit, original_message: str, schema: dict[str, Any], last: dict[str, Any]
     ) -> tuple[list[dict[str, Any]], str | None]:
         """Plan a question the rule planner could not bind, via the validated LLM planner.
+
+        The model also reviews the filters the rule parser detected (dropping
+        misreadings such as "brings in the most money") and may add typed filters
+        with explicit columns; ``edit.conditions`` is updated in place and then
+        bound against the data by the normal scope path.
 
         Returns (steps, note shown above the answer). Raises ScopeQuestion when the
         model asks for clarification or says the question is out of reach.
@@ -1245,15 +1250,31 @@ class ChatService:
         from app.planning.llm_planner import plan_question
 
         outcome = await plan_question(
-            question,
+            edit.question,
             schema,
             llm=self.llm,
             model=os.getenv("LLM_PLANNER_MODEL") or None,
-            context={"previous_steps": (last or {}).get("steps") or []},
+            context={
+                "previous_steps": (last or {}).get("steps") or [],
+                "active_filters": (last or {}).get("filters") or [],
+                "detected_filters": list(edit.conditions),
+                "original_message": original_message,
+                "today": datetime.now(timezone.utc).date().isoformat(),
+            },
         )
         if outcome.status == "plan":
+            if outcome.keep_detected is not None:
+                dropped = [c for i, c in enumerate(edit.conditions) if i not in set(outcome.keep_detected)]
+                edit.conditions = [edit.conditions[i] for i in outcome.keep_detected]
+            else:
+                dropped = []
+            edit.conditions = list(edit.conditions) + list(outcome.filters)
             ops = ", ".join(step["operator"] for step in outcome.steps)
-            note = f"Interpreted your question as: {outcome.reason or ops}" if outcome.reason else f"Plan: {ops}"
+            note = f"Interpreted your question as: {outcome.reason}" if outcome.reason else f"Plan: {ops}"
+            if dropped:
+                note += " Not treated as filters: " + ", ".join(
+                    repr(c.get("value")) for c in dropped if isinstance(c, dict) and "value" in c
+                ) + "."
             if outcome.notes:
                 note += " " + " ".join(outcome.notes)
             return outcome.steps, note

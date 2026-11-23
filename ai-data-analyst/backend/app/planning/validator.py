@@ -170,5 +170,96 @@ def validate_plan(steps: Any, schema: dict[str, Any] | None) -> ValidationResult
     return result
 
 
+_VALUE_OPS = {"eq", "ne", "in", "not_in", "gt", "ge", "lt", "le"}
+_ORDER_OPS = {"gt", "ge", "lt", "le"}
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+MAX_FILTER_LEAVES = 12
+
+
+def validate_filters(filters: Any, schema: dict[str, Any] | None) -> tuple[list[dict[str, Any]], list[str]]:
+    """Validate typed row filters in the chat_scope condition format.
+
+    Leaves: {"column", "op": eq|ne|in|not_in|gt|ge|lt|le, "value"},
+            {"column", "op": "date", "start": "YYYY-MM-DD"|null, "end": "YYYY-MM-DD"|null} (end exclusive),
+            {"column", "op": "null"|"present"}.
+    Groups: {"op": "and"|"or", "children": [...]}.
+    """
+    view = SchemaView(schema)
+    issues: list[str] = []
+    leaves = 0
+
+    def check(node: Any) -> Optional[dict[str, Any]]:
+        nonlocal leaves
+        if not isinstance(node, dict):
+            issues.append("a filter is not an object")
+            return None
+        op = str(node.get("op") or "").strip().lower()
+        if op in {"and", "or"}:
+            children = [c for c in (check(ch) for ch in (node.get("children") or [])) if c]
+            if len(children) < 2:
+                if len(children) == 1:
+                    return children[0]
+                issues.append(f"an '{op}' group needs at least two conditions")
+                return None
+            return {"op": op, "children": children}
+        leaves += 1
+        col = view.resolve(node.get("column"))
+        if col is None:
+            issues.append(f"filter column '{node.get('column')}' does not exist")
+            return None
+        if col.sensitive:
+            issues.append(f"filter column '{col.name}' is marked sensitive")
+            return None
+        if op == "date":
+            if col.kind != "datetime":
+                issues.append(f"date range on '{col.name}', which is not a date column")
+                return None
+            start, end = node.get("start"), node.get("end")
+            for label, v in (("start", start), ("end", end)):
+                if v is not None and not _ISO_DATE.match(str(v)):
+                    issues.append(f"date filter {label} '{v}' must be YYYY-MM-DD")
+                    return None
+            if start is None and end is None:
+                issues.append(f"date filter on '{col.name}' needs a start or an end")
+                return None
+            if start and end and str(start) >= str(end):
+                issues.append(f"date filter on '{col.name}' starts on or after its end")
+                return None
+            return {"column": col.name, "op": "date", "start": start, "end": end}
+        if op in {"null", "present"}:
+            return {"column": col.name, "op": op}
+        if op not in _VALUE_OPS:
+            issues.append(f"filter operator '{op}' is not supported")
+            return None
+        value = node.get("value")
+        if op in {"in", "not_in"}:
+            values = value if isinstance(value, list) else [value]
+            values = [v for v in values if v is not None and str(v) != ""]
+            if not values:
+                issues.append(f"'{op}' filter on '{col.name}' needs at least one value")
+                return None
+            return {"column": col.name, "op": op, "value": values}
+        if value is None or isinstance(value, (list, dict)) or str(value) == "":
+            issues.append(f"'{op}' filter on '{col.name}' needs one value")
+            return None
+        if op in _ORDER_OPS:
+            if col.kind != NUMERIC:
+                issues.append(f"'{op}' comparison on '{col.name}' needs a numeric column (use a date range for dates)")
+                return None
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                issues.append(f"'{op}' filter on '{col.name}' needs a number, got '{value}'")
+                return None
+        return {"column": col.name, "op": op, "value": value}
+
+    cleaned = [c for c in (check(f) for f in (filters or [])) if c] if isinstance(filters, list) else []
+    if not isinstance(filters, list) and filters not in (None, []):
+        issues.append("filters must be a list")
+    if leaves > MAX_FILTER_LEAVES:
+        issues.append(f"too many filter conditions ({leaves}); at most {MAX_FILTER_LEAVES}")
+    return ([] if issues else cleaned), issues
+
+
 def numeric_columns(schema: dict[str, Any] | None) -> list[str]:
     return [c.name for c in SchemaView(schema).columns if c.kind == NUMERIC and not c.sensitive]

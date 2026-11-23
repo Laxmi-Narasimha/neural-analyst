@@ -261,3 +261,108 @@ async def test_chat_turns_model_clarification_and_failure_into_safe_replies(talk
     assert res.status_code == 200, res.text
     assert res.json()["data"]["agent_actions"] == []
     assert "couldn't match" in res.json()["data"]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Filters proposed by the model
+# ---------------------------------------------------------------------------
+
+from app.planning.validator import validate_filters  # noqa: E402
+
+
+def test_filter_validation_binds_and_rejects():
+    ok, issues = validate_filters(
+        [
+            {"column": "branch", "op": "eq", "value": "West"},
+            {"op": "or", "children": [
+                {"column": "Net Sales", "op": "gt", "value": "15"},
+                {"column": "Invoice date", "op": "date", "start": "2026-01-01", "end": "2026-04-01"},
+            ]},
+        ],
+        SCHEMA,
+    )
+    assert issues == []
+    assert ok[0] == {"column": "Branch", "op": "eq", "value": "West"}
+    assert ok[1]["children"][0] == {"column": "Net sales", "op": "gt", "value": 15.0}
+
+    for bad, msg in [
+        ({"column": "Region", "op": "eq", "value": "x"}, "does not exist"),
+        ({"column": "Customer email", "op": "eq", "value": "a@x.com"}, "sensitive"),
+        ({"column": "Branch", "op": "gt", "value": 3}, "numeric column"),
+        ({"column": "Net sales", "op": "date", "start": "2026-01-01"}, "not a date column"),
+        ({"column": "Invoice date", "op": "date", "start": "Jan 2026", "end": None}, "YYYY-MM-DD"),
+        ({"column": "Invoice date", "op": "date", "start": "2026-03-01", "end": "2026-01-01"}, "starts on or after"),
+        ({"column": "Branch", "op": "regex", "value": ".*"}, "not supported"),
+        ({"column": "Branch", "op": "in", "value": []}, "at least one value"),
+    ]:
+        cleaned, issues = validate_filters([bad], SCHEMA)
+        assert cleaned == [] and any(msg in i for i in issues), (bad, issues)
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_detected_filter_index_is_repaired():
+    llm = ScriptedLLM(
+        {"status": "plan", "keep_detected_filters": [3], "steps": [{"operator": "dataset_overview", "params": {}}]},
+        {"status": "plan", "keep_detected_filters": [], "steps": [{"operator": "dataset_overview", "params": {}}]},
+    )
+    out = await plan_question("q", SCHEMA, llm=llm, context={"detected_filters": [{"op": "eq", "value": "x"}]})
+    assert out.status == "plan" and out.keep_detected == [] and out.attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_misread_filter_is_dropped_and_question_answered(talk_client, monkeypatch):
+    """'brings in the most money' was parsed as a value filter and failed before planning."""
+    from app.api.routes import chat
+
+    llm = ScriptedLLM({
+        "status": "plan", "keep_detected_filters": [], "filters": [],
+        "reason": "average net sales per order for each branch, highest first",
+        "steps": [{"operator": "segment_summary", "params": {"group_by": "Branch", "value_column": "Net sales", "sort_by": "value_mean"}}],
+    })
+    monkeypatch.setattr(chat, "get_llm_service", lambda: llm)
+    client, headers = talk_client
+    dataset_id = await _upload_and_process(client, headers, name="Planner sales 3", csv_text=CSV)
+    res = await client.post("/api/v1/chat", headers=headers, json={
+        "dataset_id": str(dataset_id), "message": "which branch brings in the most money per order?",
+    })
+    assert res.status_code == 200, res.text
+    answer = res.json()["data"]
+    assert answer["agent_actions"], answer["content"]
+    detected = json.loads(llm.calls[0][-1].content)["DETECTED_FILTERS"]
+    assert detected, "the rule parser should have produced the misread filter"
+    rows = next(a for a in answer["agent_actions"][0]["artifacts"] if a["artifact_type"] == "table")["preview"]["preview_rows"]
+    assert [(r["group"], r["value_mean"]) for r in rows] == [("West", 40), ("East", 10)]
+    assert "Not treated as filters" in answer["content"]
+    assert "Applied filters" not in answer["content"]
+
+
+@pytest.mark.asyncio
+async def test_model_added_filter_is_applied_and_survives_a_rule_follow_up(talk_client, monkeypatch):
+    from app.api.routes import chat
+
+    llm = ScriptedLLM({
+        "status": "plan", "keep_detected_filters": [],
+        "filters": [{"column": "Branch", "op": "eq", "value": "West"}],
+        "reason": "mean net sales per order, restricted to the West branch",
+        "steps": [{"operator": "measure_aggregate", "params": {"value_column": "Net sales", "aggregation": "mean"}}],
+    })
+    monkeypatch.setattr(chat, "get_llm_service", lambda: llm)
+    client, headers = talk_client
+    dataset_id = await _upload_and_process(client, headers, name="Planner sales 4", csv_text=CSV)
+    first = await client.post("/api/v1/chat", headers=headers, json={
+        "dataset_id": str(dataset_id), "message": "what is the typical ticket size at our western outlet?",
+    })
+    assert first.status_code == 200, first.text
+    body = first.json()["data"]
+    assert body["agent_actions"], body["content"]
+    assert "Applied filters" in body["content"] and "Matched 10 rows" in body["content"]
+    assert "40" in body["content"]
+
+    follow = await client.post("/api/v1/chat", headers=headers, json={
+        "dataset_id": str(dataset_id), "conversation_id": body["conversation_id"], "message": "what about East?",
+    })
+    assert follow.status_code == 200, follow.text
+    fbody = follow.json()["data"]
+    assert len(llm.calls) == 1, "the follow-up should be handled by the deterministic scope parser"
+    assert "Matched 30 rows" in fbody["content"], fbody["content"]
+    assert "10" in fbody["content"]
