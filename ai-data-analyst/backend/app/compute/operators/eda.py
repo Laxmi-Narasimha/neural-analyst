@@ -1946,13 +1946,17 @@ class MeasureAggregateOperator:
     name: str = "measure_aggregate"
 
     def run(self, ctx: OperatorContext, params: dict[str, Any]) -> OperatorResult:
-        measure = params["value_column"]
+        measure = params.get("value_column")
         group = params.get("group_by")
         agg = params["aggregation"]
-        if agg not in {"sum", "mean", "min", "max", "median"}:
+        if agg not in {"sum", "mean", "min", "max", "median", "count", "distinct_count"}:
             raise ValueError("Unsupported aggregation")
         if measure in _pii_columns(ctx) or group in _pii_columns(ctx):
             raise ValueError("Select a non-sensitive analysis column")
+        if agg in {"count", "distinct_count"} and not params.get("retail_unit"):
+            return self._count(ctx, measure, group, agg)
+        if not measure:
+            raise ValueError("A numeric value column is required")
         values = ctx.df[measure]
         if not pd.api.types.is_numeric_dtype(values):
             raise ValueError(f"{measure} is not numeric")
@@ -1984,9 +1988,78 @@ class MeasureAggregateOperator:
         return OperatorResult(tables={"result": table}, metrics={}, charts={},
                               summary={"value_column": measure, "group_by": group, "aggregation": agg})
 
+    @staticmethod
+    def _count(ctx: OperatorContext, measure: Any, group: Any, agg: str) -> OperatorResult:
+        """Row count (count) or distinct values of a column (distinct_count), overall or per group."""
+        df = ctx.df
+        if agg == "distinct_count":
+            if not measure:
+                raise ValueError("distinct_count needs the column whose distinct values are counted")
+            if group:
+                result = df.groupby(df[group], dropna=False, observed=True)[measure].nunique(dropna=True)
+            else:
+                table = pd.DataFrame({"value": [int(df[measure].nunique(dropna=True))]})
+        elif group:
+            result = df.groupby(df[group], dropna=False, observed=True).size()
+        else:
+            table = pd.DataFrame({"value": [int(len(df))]})
+        if group:
+            table = result.astype(int).sort_values(ascending=False, kind="stable").rename_axis("group").reset_index(name="value")
+        return OperatorResult(tables={"result": table}, metrics={}, charts={},
+                              summary={"value_column": measure, "group_by": group, "aggregation": agg})
+
+
+def _matches_value(series: pd.Series, value: Any) -> pd.Series:
+    """Rows equal to ``value``; text compares trimmed and case-insensitively, numbers numerically."""
+    if pd.api.types.is_bool_dtype(series):
+        truthy = str(value).strip().casefold() in {"true", "1", "yes", "y"}
+        return series.fillna(not truthy).astype(bool) == truthy
+    if pd.api.types.is_numeric_dtype(series):
+        try:
+            return series == float(value)
+        except (TypeError, ValueError):
+            return pd.Series(False, index=series.index)
+    return series.astype("string").str.strip().str.casefold() == str(value).strip().casefold()
+
+
+class RateOperator:
+    """Share of rows where a column equals a value: churn, return, attrition, conversion rates."""
+
+    name: str = "rate"
+
+    def run(self, ctx: OperatorContext, params: dict[str, Any]) -> OperatorResult:
+        column = params["column"]
+        positive = params["positive_value"]
+        group = params.get("group_by")
+        pii = _pii_columns(ctx)
+        if column in pii or group in pii:
+            raise ValueError("Select a non-sensitive analysis column")
+        df = ctx.df
+        known = df[column].notna()
+        hit = _matches_value(df[column], positive) & known
+        frame = pd.DataFrame({"hit": hit.astype(int), "known": known.astype(int)})
+        if group:
+            frame["group"] = df[group]
+            agg = frame.groupby("group", dropna=False, observed=True).agg(matching=("hit", "sum"), rows=("known", "sum"))
+            agg = agg[agg["rows"] > 0]
+            agg["rate"] = agg["matching"] / agg["rows"]
+            table = agg.reset_index().sort_values(["rate", "rows"], ascending=[bool(params.get("ascending")), False], kind="stable")
+        else:
+            rows = int(frame["known"].sum())
+            matching = int(frame["hit"].sum())
+            table = pd.DataFrame({"rate": [matching / rows if rows else None], "matching": [matching], "rows": [rows]})
+        table["rate_pct"] = table["rate"] * 100
+        cols = (["group"] if group else []) + ["rate", "rate_pct", "matching", "rows"]
+        return OperatorResult(
+            tables={"result": table[cols].head(1000)}, metrics={}, charts={},
+            summary={"column": column, "positive_value": positive, "group_by": group,
+                     "rows_missing_value": int((~known).sum())},
+        )
+
 
 P0_EDA_OPERATORS = [
     MeasureAggregateOperator(),
+    RateOperator(),
     SchemaSnapshotOperator(),
     DatasetOverviewOperator(),
     PreviewRowsOperator(),

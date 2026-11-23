@@ -5,7 +5,7 @@ Status is evidence-based: **Verified** means an automated test proves it; **Part
 it works for some inputs or lacks a test; **Gap** means known broken or missing; **Unreviewed**
 means nobody has checked it yet — treat it as unknown, not as working.
 
-Last updated: 2026-11-23 (branch `feature/talk-to-data-scope-and-ml-trust`).
+Last updated: 2026-11-24 (branch `feature/talk-to-data-scope-and-ml-trust`).
 
 ## Product contract
 
@@ -35,17 +35,19 @@ Last updated: 2026-11-23 (branch `feature/talk-to-data-scope-and-ml-trust`).
 | # | Use case / failure mode | Status | Evidence / next step |
 |---|---|---|---|
 | B1 | Exact supported phrasings (sum/average X by Y, trends, counts) | Verified | `test_talk_to_data_user_flow.py` |
-| B2 | Free phrasing ("which branch has the best ticket size?") | Verified (planner) | `test_llm_planner.py` with scripted model; real-model eval set still needed (B12) |
+| B2 | Free phrasing ("which branch has the best ticket size?") | Verified | Real-model eval (B12) plus `test_llm_planner.py` |
 | B3 | Filters that keep across follow-ups, AND/OR, fiscal & retail calendars | Verified | `test_chat_scope.py`, `test_chat_fiscal_disk.py` |
-| B4 | Natural phrasing misread as a filter ("brings **in the most money**"); restrictions the parser misses ("our western outlet") | Verified | Planner reviews detected filters and adds typed ones, validated by `validate_filters` then `bind_conditions`; rule follow-ups keep them (`test_llm_planner.py`). Applies when the rule planner can't plan the question |
+| B4 | Natural phrasing misread as a filter ("brings **in the most money**", "the West Branch"); restrictions the parser misses ("our western outlet") | Verified | Any rule-stage failure without a pending choice goes to the planner (parse, verify, bind, batched bind). Kept detected filters must match real values (`test_planner_value_binding.py`) |
 | B5 | Restrictions the system cannot express ("repeat customers", "big-ticket orders") | Verified | Planner returns a question instead of an answer (`test_llm_planner.py`) |
 | B6 | Hallucinated columns, wrong column types, sensitive columns in plans | Verified | `validate_plan` tests |
-| B7 | Derived metrics: ratios, per-unit, margin %, share of total, growth % | Gap | Needs a typed expression operator (safe formula over columns), not more templates |
+| B7 | Derived metrics: ratios, per-unit, margin %, share of total, growth % | Partial | Rates (`rate` operator: churn, return, attrition, conversion) and counts / distinct counts done. Ratios of two columns, share of total and growth % still need a typed expression operator |
 | B8 | Period-over-period ("vs last month", YoY) and contribution to change | Gap | New operator; the flagship analyst question |
 | B9 | Top-N with ties, bottom-N, "top 10 customers by revenue" | Partial | `segment_summary` ranks; N and ties not parameterised end to end |
 | B10 | Multi-dataset questions (joins, lookups) | Gap | Out of scope until single-dataset is solid |
-| B11 | Questions in Hindi/other languages, typos | Partial | Planner can handle via LLM; rule layer English-only; untested |
-| B12 | Real-model accuracy | Gap | Build an eval set (questions × datasets × independently computed answers) and score each model/prompt change against it |
+| B11 | Questions in Hindi/other languages, typos | Partial | Hinglish and typo cases pass the real-model eval; filter values are bound to real values with disclosed typo fixes. Only one non-English case so far |
+| B12 | Real-model accuracy | Verified | `evals/talk_eval` covers 42 cases on 3 datasets, with answers computed independently in pandas. See the results table below |
+| B13 | Filter value not in the data ("electronics", "apparal", "Toys") | Verified | Values bound to the column's complete value list; typo fixes disclosed; unknown values sent back for repair |
+| B14 | Exclusion of a value that never occurs (`Returned ≠ "orders"`) silently matching every row | Verified | Refused in `bind_conditions` (pandas and batched paths), then recovered by the planner |
 
 ## C. Calculation correctness
 
@@ -53,7 +55,7 @@ Last updated: 2026-11-23 (branch `feature/talk-to-data-scope-and-ml-trust`).
 |---|---|---|---|
 | C1 | Correct number for the asked population | Verified for supported ops | Exact-value tests across formats |
 | C2 | Sampling disclosed when a step uses a sample | Verified | Chat prepends sample notes |
-| C3 | Nulls, duplicates, zero matches | Partial | Zero-match verified; duplicate-row semantics not surfaced to user |
+| C3 | Nulls, duplicates, zero matches | Partial | Zero-match verified; rates leave empty values out of the denominator and say how many; duplicate-row semantics not surfaced to user |
 | C4 | Mixed currencies / units in one column | Gap | Detect and ask |
 | C5 | Two-sided consistency: batched DuckDB path vs pandas path give same numbers | Partial | Both tested separately; add a differential test |
 
@@ -82,9 +84,10 @@ Last updated: 2026-11-23 (branch `feature/talk-to-data-scope-and-ml-trust`).
 |---|---|---|---|
 | E1 | No key / provider outage / rate limit | Verified | Fails closed to rule planner and a clear reply |
 | E2 | Prompt injection in data values or column names | Partial | Values treated as data in prompt; sensitive values excluded; model output still constrained by validator. Add adversarial eval cases |
-| E3 | Data privacy: what leaves the server | Partial | Column names, types and ≤6 example values per non-sensitive column. Needs a per-workspace "never send examples" switch and documentation |
+| E3 | Data privacy: what leaves the server | Partial | Column names, types, date ranges, and for low-cardinality non-sensitive columns their complete value list (≤50 values; otherwise ≤6 examples). Never row data or results. **If the OpenAI org has data sharing on (the free-token program), OpenAI may train on this**: use an org without sharing for customer data. Still needs a per-workspace "never send values" switch |
 | E4 | Cost and latency per question | Unreviewed | Log tokens/latency per plan; cache plans per (dataset version, question) |
-| E5 | Model choice | Partial | `LLM_PLANNER_MODEL` / `LLM_MODEL`; local `.env` currently points at a small local model — use an OpenAI model for planning quality |
+| E5 | Model choice | Verified | Chosen from the eval (results below). `OPENAI_*` settings now read `.env`; before this fix a key placed in `.env` was silently ignored |
+| E6 | What the user is told the system did | Verified | "Interpreted your question as" is written by code from the validated plan, never in the model's words |
 
 ## F. Security and multi-tenancy — Unreviewed in this pass
 
@@ -98,10 +101,35 @@ Background job retries and timeouts, memory limits for training, concurrency on 
 
 Clarification UI for planner questions, display of "Interpreted as", evidence tables, training report (baseline, split, leakage exclusions), error states.
 
+## Real-model eval results
+
+42 cases × 3 datasets, run end to end through `/api/v1/chat` (2026-11-24). Run with
+`python -m evals.talk_eval.run --models <model>` from `ai-data-analyst/backend` (see `evals/talk_eval/README.md`).
+
+| Planner model | Pass (runs) | Median latency | Notes |
+|---|---|---|---|
+| **gpt-5.4-mini** (default) | **100%** (3 runs, 126/126) | 1.7 s | Fastest of the accurate models |
+| gpt-4.1-mini | 100% (3 runs; one scorer false positive since fixed) | 2.1 s | Good fallback |
+| gpt-5-mini | 100% (2 runs at low reasoning effort) | 4.0 s | 9 s and 88% at default reasoning effort |
+| gpt-5.4-nano | 81% (1 run) | 1.8 s | Not accurate enough for planning |
+
+Before this pass, the same eval scored **64%** with gpt-5.4-mini. The fixes:
+- rule-stage failures now recover through the planner;
+- the model sees complete value lists, date ranges and identifier flags;
+- counts and rates are real operators;
+- filter values are bound to the data;
+- a silent wrong answer (`Returned ≠ "orders"` matched every row) is now refused;
+- a batched-path crash (HTTP 500) and a row-count crash are fixed;
+- all-distinct amounts are no longer treated as IDs.
+
+Each fix is pinned offline in `tests/test_planner_value_binding.py`.
+
+The eval does not yet cover: workbooks, files over the batching threshold, ratios of two columns, period-over-period, multi-dataset questions, or real user phrasing collected from production.
+
 ## Build order
 
-1. ~~**B4** LLM-proposed filters as validated conditions~~ — done.
-2. **B12** Real-model evaluation set and scorer; run it against the configured OpenAI model.
+1. ~~**B4** LLM-proposed filters as validated conditions~~: done.
+2. ~~**B12** Real-model evaluation set and scorer~~: done. Rerun it on every planner change.
 3. **B7/B8** Derived metrics and period-over-period with contribution — the flagship analyst answers.
 4. **F** Per-owner model registry and an ownership audit of all routes.
 5. **D6–D10** Imbalance handling, calibration, segment error analysis, explicit prediction moment, batch scoring with drift.

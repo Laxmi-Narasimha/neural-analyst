@@ -508,18 +508,29 @@ class ChatService:
             matched_rows = None
             disk = None
             planner_note: str | None = None
+            force_llm = False
             try:
                 if not effective_message.strip() and sheets:
                     edit = ScopeEdit("", [], [])
                 elif effective_message.strip() in starter_plans(schema):
                     edit = ScopeEdit(effective_message.strip(), [], [])
                 else:
-                    edit = parse_scope(effective_message, schema, today=datetime.now(timezone.utc).date(), bindings=bindings)
+                    try:
+                        edit = parse_scope(effective_message, schema, today=datetime.now(timezone.utc).date(), bindings=bindings)
+                    except ScopeQuestion as error:
+                        # The rule parser could not read the restriction; the validated
+                        # planner gets the whole message instead of the user getting a dead end.
+                        if plan is not None or not self._llm_can_recover(error):
+                            raise
+                        edit = ScopeEdit(effective_message.strip(), [], [])
+                        force_llm = True
                 if not edit.question and not edit.clear and not last and conv_ctx.get("turn_history") and plan is None:
                     raise ScopeQuestion("This older conversation has no saved calculation or filters. Restate the calculation with its conditions once to continue.")
                 if plan is None:
-                    if edit.question:
+                    if edit.question and not force_llm:
                         plan = self._select_plan(edit.question, dataset_record=dataset_record)
+                    elif edit.question:
+                        plan = []
                     else:
                         plan = last.get("steps") or [{"operator": "dataset_overview", "params": {}}]
                         if edit.clear and any(s["operator"].startswith("ml_") for s in plan):
@@ -533,7 +544,14 @@ class ChatService:
                 if planner_note is None:
                     # Rule plans bind keywords, so residual qualifiers must be refused here.
                     # LLM plans report unbound restrictions themselves (see app/planning).
-                    verify_measurement(edit.question, schema, plan)
+                    try:
+                        verify_measurement(edit.question, schema, plan)
+                    except ScopeQuestion as error:
+                        if resolved_plan is not None or not edit.question or not self._llm_can_recover(error):
+                            raise
+                        plan, planner_note = await self._plan_with_llm(edit, effective_message, schema, last)
+                        if not plan:
+                            raise
                 if edit.retail_group:
                     if len(plan) != 1 or plan[0]["operator"] != "measure_aggregate":
                         raise ScopeQuestion("Name a numeric measure, for example ‘sum Sales by retail period using Posted’.")
@@ -576,14 +594,36 @@ class ChatService:
                 if sheets and any(s["operator"] == "ml_train_baseline" for s in plan) and self._detect_ml_mode(effective_message) == "automl" and sheets != [catalog[0]["name"]]:
                     raise ScopeQuestion("Full AutoML jobs use the uploaded dataset’s first worksheet. Use a quick baseline to train on the selected worksheets.")
                 if sheets or await asyncio.to_thread(needs_scan, dataset_record):
-                    disk = await asyncio.to_thread(prepare_scan, dataset_record, edit, last.get("filters", []), plan, bindings)
+                    try:
+                        disk = await asyncio.to_thread(prepare_scan, dataset_record, edit, last.get("filters", []), plan, bindings)
+                    except ScopeQuestion as error:
+                        if (planner_note is not None or resolved_plan is not None or not edit.question
+                                or not self._llm_can_recover(error)):
+                            raise
+                        replan, planner_note = await self._plan_with_llm(edit, effective_message, schema, last)
+                        if not replan:
+                            raise
+                        plan = replan
+                        disk = await asyncio.to_thread(prepare_scan, dataset_record, edit, last.get("filters", []), plan, bindings)
                     loaded, conditions = disk.loaded, disk.filters
                     matched_rows = disk.rows if conditions else None
                 elif edit.conditions or (last.get("filters") and not edit.clear):
                     loaded = await self.dataset_loader.load_dataset(active_dataset_id, owner_id=self.user_id)
                     if version and version != loaded.version_hash:
                         raise ScopeQuestion("The dataset changed while planning. Please retry on its current version.")
-                    conditions = await asyncio.to_thread(bind_conditions, edit, last.get("filters", []), loaded, plan, bindings)
+                    try:
+                        conditions = await asyncio.to_thread(bind_conditions, edit, last.get("filters", []), loaded, plan, bindings)
+                    except ScopeQuestion as error:
+                        # A rule-detected value that matches no column (e.g. 'the West Branch'):
+                        # let the planner review the detected filters, then bind its typed ones.
+                        if (planner_note is not None or resolved_plan is not None or not edit.question
+                                or not self._llm_can_recover(error)):
+                            raise
+                        replan, planner_note = await self._plan_with_llm(edit, effective_message, schema, last)
+                        if not replan:
+                            raise
+                        plan = replan
+                        conditions = await asyncio.to_thread(bind_conditions, edit, last.get("filters", []), loaded, plan, bindings)
                     if conditions:
                         if any(s["operator"] in {"ml_train_baseline", "ml_task_inference"} for s in plan):
                             raise ScopeQuestion("This modeling workflow needs a versioned filtered dataset. Save the filtered rows as a dataset before training.")
@@ -1234,6 +1274,17 @@ class ChatService:
                     return str(col.get("name"))
         return None
 
+    def _llm_can_recover(self, error: ScopeQuestion) -> bool:
+        """A rule-stage refusal the planner may resolve: not a pending choice, and a model is configured."""
+        from app.planning.llm_planner import planner_enabled
+
+        if error.key or error.choices or not planner_enabled() or self.llm is None:
+            return False
+        try:
+            return bool(getattr(self.llm, "is_available", True))
+        except Exception:
+            return False
+
     async def _plan_with_llm(
         self, edit: ScopeEdit, original_message: str, schema: dict[str, Any], last: dict[str, Any]
     ) -> tuple[list[dict[str, Any]], str | None]:
@@ -1247,7 +1298,7 @@ class ChatService:
         Returns (steps, note shown above the answer). Raises ScopeQuestion when the
         model asks for clarification or says the question is out of reach.
         """
-        from app.planning.llm_planner import plan_question
+        from app.planning.llm_planner import describe_plan, plan_question
 
         outcome = await plan_question(
             edit.question,
@@ -1269,8 +1320,8 @@ class ChatService:
             else:
                 dropped = []
             edit.conditions = list(edit.conditions) + list(outcome.filters)
-            ops = ", ".join(step["operator"] for step in outcome.steps)
-            note = f"Interpreted your question as: {outcome.reason}" if outcome.reason else f"Plan: {ops}"
+            # Written from the validated plan, never from the model's own wording.
+            note = f"Interpreted your question as: {describe_plan(outcome.steps)}."
             if dropped:
                 note += " Not treated as filters: " + ", ".join(
                     repr(c.get("value")) for c in dropped if isinstance(c, dict) and "value" in c
@@ -1544,8 +1595,28 @@ class ChatService:
             preview_rows, _ = _first_table_preview(r)
             summary = getattr(r, "summary", {}) or {}
 
-            if op == "measure_aggregate" and preview_rows:
-                label = f"{summary['aggregation'].title()} of **{summary['value_column']}**"
+            if op == "rate" and preview_rows:
+                what = f"**{summary.get('column')}** = {summary.get('positive_value')}"
+                def _pct(row):
+                    rate = row.get("rate")
+                    if rate is None:
+                        return "n/a (no rows with a value)"
+                    return f"{float(rate) * 100:.2f}% ({_fmt_number(row.get('matching'))} of {_fmt_number(row.get('rows'))})"
+                if summary.get("group_by"):
+                    items = [f"- {row.get('group')}: {_pct(row)}" for row in preview_rows[:10]]
+                    sections.append(f"Share of rows where {what}, by **{summary['group_by']}**:\n" + "\n".join(items))
+                else:
+                    sections.append(f"Share of rows where {what}: {_pct(preview_rows[0])}.")
+                if summary.get("rows_missing_value"):
+                    sections.append(f"{_fmt_number(summary['rows_missing_value'])} rows with an empty {summary.get('column')} are not counted.")
+            elif op == "measure_aggregate" and preview_rows:
+                agg = summary.get("aggregation")
+                if agg == "count":
+                    label = "**Number of rows**"
+                elif agg == "distinct_count":
+                    label = f"Number of distinct **{summary.get('value_column')}**"
+                else:
+                    label = f"{str(agg).title()} of **{summary['value_column']}**"
                 if summary.get("group_by"):
                     items = [f"- {row.get('group')}: {_fmt_number(row.get('value'))}" for row in preview_rows[:5]]
                     sections.append(f"{label} by **{summary['group_by']}** (first groups):\n" + "\n".join(items))

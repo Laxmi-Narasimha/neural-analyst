@@ -290,7 +290,7 @@ class ConnectionsConfig(BaseSettings):
 class OpenAIConfig(BaseSettings):
     """OpenAI API configuration."""
     
-    model_config = SettingsConfigDict(env_prefix="OPENAI_")
+    model_config = SettingsConfigDict(env_prefix="OPENAI_", env_file=".env", env_file_encoding="utf-8", extra="ignore")
     
     api_key: Optional[SecretStr] = Field(default=None, description="OpenAI API key (optional for local/Ollama use)")
     organization: Optional[str] = Field(default=None, description="OpenAI organization ID")

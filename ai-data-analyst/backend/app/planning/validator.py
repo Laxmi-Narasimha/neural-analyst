@@ -8,11 +8,12 @@ numeric settings are kept within their declared ranges.
 
 from __future__ import annotations
 
+import difflib
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from app.planning.catalog import ANY, CATALOG, NUMERIC, OperatorSpec, Param, column_kind
+from app.planning.catalog import ANY, CATALOG, NUMERIC, NUMERIC_AGGREGATIONS, OperatorSpec, Param, column_kind
 
 MAX_STEPS = 4
 
@@ -26,6 +27,61 @@ class ColumnInfo:
     name: str
     kind: str
     sensitive: bool = False
+    # Every distinct value, when the profile holds the complete list; else None.
+    values: Optional[list[str]] = None
+    identifier: bool = False
+
+
+_ID_NAME = re.compile(r"(?:^|[^a-z])(?:id|ids|#|no|nbr|num|number|code|key|uuid|guid|sku)(?:[^a-z]|$)|id$", re.I)
+
+
+def is_identifier(c: dict[str, Any]) -> bool:
+    """The profiler marks every all-distinct column as unique; for numbers that alone is not an ID
+    (a revenue column can have no repeated amounts), so numeric IDs also need an ID-like name."""
+    if not c.get("is_unique_identifier"):
+        return False
+    if column_kind(c.get("inferred_type", "")) != NUMERIC:
+        return True
+    return bool(_ID_NAME.search(str(c.get("name") or "").strip()))
+
+
+def complete_values(c: dict[str, Any]) -> Optional[list[str]]:
+    """The column's full value list from its profile, or None when only a sample is known."""
+    top = c.get("top_values")
+    unique = c.get("unique_count")
+    if isinstance(top, dict) and top and isinstance(unique, int) and len(top) >= unique:
+        return [str(k) for k in top.keys()]
+    return None
+
+
+def _similarity(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def canonical_value(col: ColumnInfo, value: Any) -> tuple[Any, Optional[str], Optional[str]]:
+    """Bind a user/model value to the column's real value: (value, note, issue)."""
+    if col.kind == NUMERIC:
+        if isinstance(value, bool):
+            return value, None, None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return value, None, f"'{value}' is not a number, but column '{col.name}' is numeric"
+        return (int(number) if number.is_integer() else number), None, None
+    if not col.values or not isinstance(value, (str, int, float)) or isinstance(value, bool):
+        return value, None, None
+    text = str(value).strip()
+    if text in col.values:
+        return text, None, None
+    folded = {v.strip().casefold(): v for v in col.values}
+    if text.casefold() in folded:
+        return folded[text.casefold()], None, None
+    close = difflib.get_close_matches(text.casefold(), list(folded), n=2, cutoff=0.75)
+    if close and (len(close) == 1 or _similarity(text.casefold(), close[0]) - _similarity(text.casefold(), close[1]) > 0.1):
+        chosen = folded[close[0]]
+        return chosen, f"Read '{text}' as {col.name} = '{chosen}'.", None
+    shown = ", ".join(col.values[:20]) + (" ..." if len(col.values) > 20 else "")
+    return value, None, f"'{text}' is not a value of column '{col.name}' (its values: {shown})"
 
 
 @dataclass
@@ -50,6 +106,8 @@ class SchemaView:
                     name=str(c["name"]),
                     kind=column_kind(c.get("inferred_type", "")),
                     sensitive=bool(c.get("is_potential_pii")),
+                    values=None if c.get("is_potential_pii") else complete_values(c),
+                    identifier=is_identifier(c),
                 )
             )
         self._exact = {c.name: c for c in self.columns}
@@ -104,6 +162,11 @@ def _check_param(spec: OperatorSpec, p: Param, value: Any, schema: SchemaView, r
         if p.max is not None and number > p.max:
             number = p.max
         return number
+    if p.kind == "value":
+        if isinstance(value, (list, dict)):
+            result.issues.append(f"{label}: give a single value")
+            return None
+        return value  # bound to its column in validate_plan
     if p.kind == "bool":
         if isinstance(value, bool):
             return value
@@ -157,6 +220,37 @@ def validate_plan(steps: Any, schema: dict[str, Any] | None) -> ValidationResult
             if checked is not None:
                 params[p.name] = checked
         # Cross-parameter rules.
+        if op == "measure_aggregate":
+            agg = params.get("aggregation")
+            col = view.resolve(params.get("value_column")) if params.get("value_column") else None
+            if agg in NUMERIC_AGGREGATIONS:
+                if col is None:
+                    result.issues.append(f"measure_aggregate: {agg} needs a numeric value_column")
+                elif col.kind != NUMERIC:
+                    result.issues.append(f"measure_aggregate: {agg} needs a numeric column, but '{col.name}' is {col.kind}")
+                elif col.identifier:
+                    result.issues.append(f"measure_aggregate: '{col.name}' is an identifier; aggregate a measure instead")
+            elif agg == "count":
+                params.pop("value_column", None)
+            elif agg == "distinct_count" and col is None:
+                result.issues.append("measure_aggregate: distinct_count needs the column whose distinct values are counted")
+        if op == "segment_summary" and params.get("value_column"):
+            col = view.resolve(params["value_column"])
+            if col is not None and col.identifier:
+                result.issues.append(
+                    f"segment_summary: '{col.name}' is an identifier, not a measure; omit value_column to rank by count")
+        if op == "rate" and params.get("column") and "positive_value" in params:
+            col = view.resolve(params["column"])
+            if col is not None:
+                bound, note, issue = canonical_value(col, params["positive_value"])
+                if issue:
+                    result.issues.append(f"rate.positive_value: {issue}")
+                else:
+                    params["positive_value"] = bound
+                    if note:
+                        result.notes.append(note)
+        if op == "rate" and params.get("group_by") and params.get("group_by") == params.get("column"):
+            result.issues.append("rate: group_by cannot be the outcome column")
         if op == "segment_summary" and params.get("sort_by", "count") != "count" and "value_column" not in params:
             result.issues.append("segment_summary: ranking by a value needs value_column")
         if op == "relationship_explain" and params.get("column_a") and params.get("column_a") == params.get("column_b"):
@@ -176,7 +270,9 @@ _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 MAX_FILTER_LEAVES = 12
 
 
-def validate_filters(filters: Any, schema: dict[str, Any] | None) -> tuple[list[dict[str, Any]], list[str]]:
+def validate_filters(
+    filters: Any, schema: dict[str, Any] | None, notes: Optional[list[str]] = None
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Validate typed row filters in the chat_scope condition format.
 
     Leaves: {"column", "op": eq|ne|in|not_in|gt|ge|lt|le, "value"},
@@ -232,12 +328,23 @@ def validate_filters(filters: Any, schema: dict[str, Any] | None) -> tuple[list[
             issues.append(f"filter operator '{op}' is not supported")
             return None
         value = node.get("value")
+
+        def bind(v: Any) -> Any:
+            bound, note, issue = canonical_value(col, v)
+            if issue:
+                issues.append(f"filter on '{col.name}': {issue}")
+            elif note and notes is not None:
+                notes.append(note)
+            return bound
+
         if op in {"in", "not_in"}:
             values = value if isinstance(value, list) else [value]
             values = [v for v in values if v is not None and str(v) != ""]
             if not values:
                 issues.append(f"'{op}' filter on '{col.name}' needs at least one value")
                 return None
+            if col.kind != NUMERIC:
+                values = [bind(v) for v in values]
             return {"column": col.name, "op": op, "value": values}
         if value is None or isinstance(value, (list, dict)) or str(value) == "":
             issues.append(f"'{op}' filter on '{col.name}' needs one value")
@@ -251,6 +358,8 @@ def validate_filters(filters: Any, schema: dict[str, Any] | None) -> tuple[list[
             except (TypeError, ValueError):
                 issues.append(f"'{op}' filter on '{col.name}' needs a number, got '{value}'")
                 return None
+        elif col.kind != NUMERIC:
+            value = bind(value)
         return {"column": col.name, "op": op, "value": value}
 
     cleaned = [c for c in (check(f) for f in (filters or [])) if c] if isinstance(filters, list) else []

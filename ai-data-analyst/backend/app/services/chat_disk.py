@@ -73,6 +73,48 @@ def _aggregate(con, op, p, fields, numeric, dates):
             rows.append((name, *stats))
         table = pd.DataFrame(rows, columns=["column", "count", "mean", "std", "min", "25%", "50%", "75%", "max"])
         return _result("numeric_summary", table, {"numeric_columns": len(rows)}, {"numeric_columns": len(rows)})
+    if op == "rate":
+        col, group = p["column"], p.get("group_by")
+        c = fields[col]
+        kind = (con.execute(f"SELECT typeof({c}) FROM matches LIMIT 1").fetchone() or ("VARCHAR",))[0]
+        positive = str(p["positive_value"]).strip()
+        args: list = []
+        if kind in {"BIGINT", "DOUBLE", "INTEGER", "FLOAT"}:
+            try:
+                hit = f"{c} = ?"
+                args = [float(positive)]
+            except ValueError:
+                hit = "FALSE"
+        elif kind == "BOOLEAN":
+            hit = f"{c} = ?"
+            args = [positive.casefold() in {"true", "1", "yes", "y"}]
+        else:
+            hit = f"lower(trim(cast({c} AS VARCHAR))) = ?"
+            args = [positive.casefold()]
+        select = (f'SELECT {"cast(" + fields[group] + " AS VARCHAR) AS " + chr(34) + "group" + chr(34) + ", " if group else ""}'
+                  f"sum(CASE WHEN {c} IS NOT NULL AND {hit} THEN 1 ELSE 0 END) AS matching, count({c}) AS rows FROM matches")
+        if group:
+            select += f" GROUP BY {fields[group]} HAVING count({c}) > 0"
+        table = con.execute(select, args).fetchdf()
+        table["matching"] = table["matching"].astype(int)
+        table["rows"] = table["rows"].astype(int)
+        table["rate"] = table["matching"] / table["rows"].where(table["rows"] > 0)
+        if group:
+            table = table.sort_values(["rate", "rows"], ascending=[bool(p.get("ascending")), False], kind="stable")
+        table["rate_pct"] = table["rate"] * 100
+        missing = con.execute(f"SELECT count(*) - count({c}) FROM matches").fetchone()[0]
+        cols = (["group"] if group else []) + ["rate", "rate_pct", "matching", "rows"]
+        return _result("result", table[cols].head(1000), {"column": col, "positive_value": p["positive_value"],
+                                                           "group_by": group, "rows_missing_value": int(missing)})
+    if op == "measure_aggregate" and p["aggregation"] in {"count", "distinct_count"} and not p.get("retail_unit"):
+        if p["aggregation"] == "distinct_count":
+            expr = f"count(DISTINCT {fields[value]})"
+        else:
+            expr = "count(*)"
+        projection = f'{fields[group]} AS "group", ' if group else ""
+        order = ' GROUP BY 1 ORDER BY value DESC NULLS LAST, 1 LIMIT 1001' if group else ""
+        table = con.execute(f"SELECT {projection}{expr} AS value FROM matches{order}").fetchdf()
+        return _result("result", table.head(1000), {**p, "groups_truncated": len(table) > 1000})
     if op == "measure_aggregate":
         fn = {"mean": "avg", "sum": "sum", "min": "min", "max": "max", "median": "median"}[p["aggregation"]]
         if p.get("retail_unit"):
@@ -168,6 +210,10 @@ def _scan(record, edit, previous, plan, bindings):
                           pd.DataFrame(columns=list(cols)), {}, schema)
     wanted = {str(c["value"]).casefold() for c in condition_leaves(edit.conditions)
               if not c.get("column") and c["op"] != "date"}
+    # Exclusions are checked against the data too: excluding a value that never occurs changes nothing.
+    for c in condition_leaves(edit.conditions):
+        if c.get("column") and c["op"] in {"ne", "not_in"}:
+            wanted.update(str(v).casefold() for v in (c["value"] if isinstance(c.get("value"), list) else [c.get("value")]))
     hits = {v: set() for v in wanted}
     def batches():
         return dataset_batches.frames(path, record.file_format, schema)
@@ -180,7 +226,7 @@ def _scan(record, edit, previous, plan, bindings):
                 for v in wanted:
                     if name not in hits[v] and values.eq(v).any():
                         hits[v].add(name)
-    conditions = bind_conditions(edit, previous, empty, plan, bindings, lambda n, v: n in hits[v])
+    conditions = bind_conditions(edit, previous, empty, plan, bindings, lambda n, v: n in hits.get(str(v).casefold(), ()))
     if conditions and any(s["operator"] in {"ml_train_baseline", "ml_task_inference"} for s in plan):
         raise ScopeQuestion("Save the filtered rows as a versioned dataset before training.")
     fields = {name: f"c{i}" for i, name in enumerate(cols)}
@@ -201,7 +247,7 @@ def _scan(record, edit, previous, plan, bindings):
         else:
             types[name] = "VARCHAR"
     limit = dataset_batches.BATCH_ROWS
-    aggregates = {"measure_aggregate", "resample_aggregate", "segment_summary", "numeric_summary", "correlation_matrix"}
+    aggregates = {"measure_aggregate", "resample_aggregate", "segment_summary", "numeric_summary", "correlation_matrix", "rate"}
     exact = {"dataset_overview", "preview_rows", "schema_snapshot", "duckdb_profile", "missingness_scan"}
     needs_all = any(s["operator"] not in aggregates | exact or
                     (s["operator"] == "segment_summary" and not s.get("params", {}).get("group_by")) for s in plan)
@@ -209,14 +255,16 @@ def _scan(record, edit, previous, plan, bindings):
     for step in plan:
         op, params = step["operator"], step.get("params", {})
         if op in aggregates:
-            needed.update(params.get(k) for k in ("value_column", "time_column", "group_by"))
+            needed.update(params.get(k) for k in ("value_column", "time_column", "group_by", "column"))
             if op in {"numeric_summary", "correlation_matrix"}:
                 needed.update(numeric[:max(2, min(200, int(params.get("max_columns", 25))))])
-            elif not params.get("value_column") and numeric:
+            elif not params.get("value_column") and numeric and op != "rate" and params.get("aggregation") not in {"count", "distinct_count"}:
                 needed.add(numeric[0])
             if op == "resample_aggregate" and not params.get("time_column") and dates:
                 needed.add(dates[0])
     projected = [n for n in cols if needs_all or n in needed]
+    if not projected and cols and any(s["operator"] in aggregates for s in plan):
+        projected = [next(iter(cols))]  # e.g. a plain row count still needs rows to count
     with TemporaryDirectory(prefix="neural-analyst-") as work:
         with duckdb.connect(str(Path(work) / "scan.duckdb"), config={"memory_limit": "128MB", "threads": "1"}) as con:
             if projected:

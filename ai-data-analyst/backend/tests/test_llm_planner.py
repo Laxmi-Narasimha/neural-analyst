@@ -225,7 +225,8 @@ async def test_chat_uses_llm_plan_for_unmatched_questions_and_numbers_come_from_
     table = next(a for a in action["artifacts"] if a["artifact_type"] == "table")
     rows = table["preview"]["preview_rows"]
     assert [(r["group"], r["value_mean"]) for r in rows] == [("West", 40), ("East", 10)]
-    assert answer["content"].startswith("Interpreted your question as: average net sales per order")
+    # Described by code from the validated plan, not in the model's words.
+    assert answer["content"].startswith("Interpreted your question as: Branch ranked by average Net sales, highest first.")
 
     # A rule-supported question never reaches the model.
     rule = await client.post("/api/v1/chat", headers=headers, json={

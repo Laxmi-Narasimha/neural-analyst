@@ -15,8 +15,13 @@ import pytest_asyncio
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 # Never let the suite reach a real language model by accident (a local .env may
-# configure one). Planner tests enable it explicitly with a scripted fake model.
+# configure one, with a real key). Planner tests enable it explicitly with a
+# scripted fake model; real-model accuracy is measured by evals/talk_eval instead.
+# Environment variables win over .env in the settings classes.
 os.environ.setdefault("LLM_PLANNER", "off")
+os.environ["OPENAI_API_KEY"] = ""
+os.environ["LLM_MODEL"] = "ollama/offline-test-model"
+os.environ.pop("LLM_PLANNER_MODEL", None)
 
 
 # =============================================================================

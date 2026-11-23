@@ -7,6 +7,8 @@ dataset before anything runs:
 * ``enum``    - one of ``choices``
 * ``int``     - integer within [min, max]
 * ``bool``    - true/false
+* ``value``   - a value of the column named by the operator's ``column`` parameter,
+                bound to the real values in the data by the validator
 
 Only operators listed here can be planned. Their implementations live in
 app/compute/operators and are the only code that produces numbers.
@@ -27,7 +29,7 @@ ANY = "any"
 @dataclass(frozen=True)
 class Param:
     name: str
-    kind: str  # column | enum | int | bool
+    kind: str  # column | enum | int | bool | value
     description: str
     required: bool = False
     column_types: tuple[str, ...] = (ANY,)
@@ -48,7 +50,8 @@ class OperatorSpec:
         return next((p for p in self.params if p.name == name), None)
 
 
-AGGREGATIONS = ("sum", "mean", "median", "min", "max")
+AGGREGATIONS = ("sum", "mean", "median", "min", "max", "count", "distinct_count")
+NUMERIC_AGGREGATIONS = ("sum", "mean", "median", "min", "max")
 FREQUENCIES = ("D", "W", "M", "Q", "Y")
 
 CATALOG: dict[str, OperatorSpec] = {
@@ -72,13 +75,30 @@ CATALOG: dict[str, OperatorSpec] = {
         ),
         OperatorSpec(
             "measure_aggregate",
-            "One exact aggregate of a numeric column, optionally per group (sum, mean, median, min, max).",
-            "Total / average / median / min / max of a measure, overall or by a category. Prefer this for "
-            "any single-number or per-group number question.",
+            "One exact aggregate, optionally per group: sum, mean, median, min or max of a numeric column; "
+            "count = number of rows; distinct_count = number of distinct values of a column.",
+            "Total / average / median / min / max of a measure, overall or by a category; 'how many orders/"
+            "employees/accounts' (count, with filters for the restriction); 'how many unique customers' "
+            "(distinct_count). Prefer this for any single-number or per-group number question.",
             (
-                Param("value_column", "column", "Numeric measure to aggregate", required=True, column_types=(NUMERIC,)),
+                Param("value_column", "column", "Numeric measure (sum/mean/median/min/max), the column whose "
+                      "distinct values are counted (distinct_count), or omitted (count)", column_types=(ANY,)),
                 Param("aggregation", "enum", "Aggregation", required=True, choices=AGGREGATIONS),
                 Param("group_by", "column", "Optional grouping column", column_types=(CATEGORICAL, ANY)),
+            ),
+        ),
+        OperatorSpec(
+            "rate",
+            "Share of rows where a column equals one value (e.g. churned = 1, Returned = Yes), overall or per "
+            "group, with the matching and total row counts.",
+            "Churn rate, return rate, attrition rate, conversion rate, win rate, '% of orders that ...', "
+            "'what share of ...'. Rows where the column is empty are left out of the denominator.",
+            (
+                Param("column", "column", "Column that marks the outcome", required=True, column_types=(ANY,)),
+                Param("positive_value", "value", "The value of that column that counts as the outcome, as it "
+                      "appears in the column's values", required=True),
+                Param("group_by", "column", "Optional grouping column", column_types=(CATEGORICAL, ANY)),
+                Param("ascending", "bool", "True ranks the lowest rate first", default=False),
             ),
         ),
         OperatorSpec(

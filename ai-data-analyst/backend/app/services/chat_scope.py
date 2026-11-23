@@ -558,6 +558,15 @@ def bind_conditions(edit: ScopeEdit, previous: list[dict], loaded: LoadedDataset
             col = candidates[0]
         if col not in loaded.df:
             raise ScopeQuestion(f"The active dataset has no column named {col}.")
+        if item["op"] in {"ne", "not_in"} and columns.get(col, {}).get("inferred_type") not in _NUMBER_TYPES | _DATE_TYPES:
+            values = item["value"] if isinstance(item.get("value"), list) else [item.get("value")]
+            present = lambda v: (find_values(col, str(v).casefold()) if find_values
+                                 else loaded.df[col].astype("string").str.casefold().eq(str(v).casefold()).any())
+            missing = [v for v in values if not present(v)]
+            if missing:
+                # 'excluding returned orders' read as Returned != 'orders' would keep every row.
+                raise ScopeQuestion(f"{col} has no value {missing[0]!r}, so excluding it would change nothing. "
+                                    f"Specify the value to exclude, for example ‘where {col} != value’.")
         item["column"] = col
         return item
 
