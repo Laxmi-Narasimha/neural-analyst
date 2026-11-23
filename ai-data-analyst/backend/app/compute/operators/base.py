@@ -14,6 +14,8 @@ class OperatorContext:
     df: pd.DataFrame
     profile_report: dict[str, Any]
     schema_info: dict[str, Any]
+    source_file_path: str | None = None
+    source_file_format: str | None = None
 
 
 @dataclass(frozen=True)

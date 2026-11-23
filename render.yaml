@@ -23,7 +23,7 @@ services:
         fromDatabase:
           name: ai-data-analyst-db
           property: connectionString
-      - key: SECRET_KEY
+      - key: SECURITY_SECRET_KEY
         generateValue: true
       - key: OPENAI_API_KEY
         sync: false

@@ -5,6 +5,18 @@ This repo is a **single product** (`ai-data-analyst/`) with optional legacy refe
 - `ai-data-analyst/`: FastAPI + Next.js — Talk to Your Data, Data Speaks, Data Adequacy (merged validator), subscriptions (SaaS), self-host Docker.
 - `ai-data-validator/`: **Deprecated** — merged into `ai-data-analyst` at `/app/quality`. See `ai-data-validator/DEPRECATED.md`.
 
+After a dataset is processed, **Talk to your data** offers questions based on its column types and profile. Each supported calculation opens a saved evidence table in the chat when one is available. For example, ask `average Net sales by Branch` on a file with those columns. The [companion skill](.agents/skills/neural-analyst/SKILL.md) can ask the same question and inspect the same evidence from Codex or Claude Code.
+
+In one conversation, try `Show the monthly trend for Net sales using Invoice date for West only`, then `Now only Q1 2026`, then `What about East?`. Use your dataset’s actual column names and values. Each filtered answer shows the applied conditions and the number of matching rows. To change one part of the selection, use `remove Branch filter` or `all dates`. Use `clear all filters` to select all rows.
+
+Dates use UTC. For a month-based fiscal calendar, try `sum Net sales in Q1 FY2026 where (Branch = West or Channel = Online)`. The chat asks for the starting month and whether a single FY label names the starting or ending year. A label such as `FY2025-26` specifies both years. Follow-ups can use `what about Q2`, `FYTD`, or `from FY2025 Q3 through FY2026 Q1`.
+
+For a week-based calendar, try `sum Net sales in 4-4-5 P12 FY2023 where Branch = West`, then `what about week 53?`. Chat remembers the pattern and year-end convention for this dataset conversation. Choose the January preset or specify the anchor month, ending weekday, nearest or last weekday rule, FY label and which period receives the extra week. The supported patterns are 4-4-5, 4-5-4 and 5-4-4. Use `sum Net sales by retail period using Invoice date` for a breakdown. The `NRF` shorthand uses the published, non-restated 4-5-4 calendar. [NRF calendar](https://nrf.com/resources/4-5-4-calendar)
+
+AND binds more tightly than OR. Parentheses group alternatives, and each matching row counts once. If a value, date column or follow-up is ambiguous, the chat asks for clarification. Use `cancel clarification` to return to the last completed analysis.
+
+For large CSV, TSV, Parquet, flat JSON, XLSX and legacy XLS uploads, chat scans batches and uses temporary disk storage for aggregations. Upload the original binary `.xls` file directly. In Talk to Your Data, open **Worksheets** to select one tab or combine several. You can also ask `sum Amount across sheets "North" and "South"`. The first sheet is the default. Each tab’s first row supplies its headers. Selected tabs are stacked by column name, with blanks for absent columns. Group by the source worksheet field shown in the answer to compare tabs. Follow-ups retain the selection and filters. Excel formulas use their saved results. Counts, supported totals, grouped measures, medians, trends, numeric summaries and Pearson correlations cover every matching row. For operators that use a sample, the answer identifies the operator, sample size and matching population.
+
 ## Local Dev (Windows)
 
 Prereqs:

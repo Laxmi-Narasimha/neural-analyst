@@ -48,10 +48,12 @@ from app.core.exceptions import (
 from app.core.logging import get_logger, LogContext
 from app.core.serialization import to_jsonable
 from app.compute.artifacts import ArtifactStore, TableStorageFormat
+from app.compute.starter_questions import starter_plans
 from app.models import Artifact as ArtifactModel
 from app.services.artifact_index import ArtifactIndexService
 from app.services.database import get_db_session
 from app.services.dataset_loader import DatasetLoaderService
+from app.services.subscription_service import PREVIEW_OPERATORS, SubscriptionService
 from app.api.routes.auth import require_permission
 from app.services.auth_service import AuthUser, Permission
 
@@ -332,6 +334,9 @@ async def upload_dataset(
             filename=original_filename,
             reason=f"File size ({file_size / 1024 / 1024:.1f}MB) exceeds maximum ({settings.max_upload_size_mb}MB)"
         )
+
+    subscription = SubscriptionService(db)
+    await subscription.assert_can_upload(user_id, file_size_bytes=file_size)
     
     try:
         # Store the file via the configured object store (local disk or S3).
@@ -390,6 +395,8 @@ async def upload_dataset(
         db.add(job)
         await db.commit()
         await db.refresh(job)
+
+        await subscription.record_upload(user_id)
 
         enqueue_dataset_processing(background_tasks=background_tasks, dataset_id=dataset.id, job_id=job.id)
         
@@ -513,6 +520,22 @@ async def get_dataset(
         for c in dataset.columns
     ]
     
+    dataset_status = _schema_dataset_status(dataset.status)
+    questions = starter_plans(dataset.schema_info) if dataset_status == DatasetStatus.READY else {}
+    subscription = SubscriptionService(db)
+    if questions and subscription.is_enforcement_enabled():
+        account = await subscription.get_status(user.user_id)
+        if account["limits"].get("compute_sessions") == 0:
+            questions = {q: step for q, step in questions.items() if step["operator"] in PREVIEW_OPERATORS}
+
+    schema_info = dataset.schema_info or {}
+    if dataset_status == DatasetStatus.READY and dataset.file_format in {"xls", "xlsx"}:
+        from app.services.workbook_scope import workbook_catalog
+        catalog = await workbook_catalog(dataset, db)
+        if "worksheet_catalog" not in schema_info:
+            await db.commit()
+        schema_info = {**schema_info, "worksheet_catalog": catalog}
+
     response = DatasetDetailResponse(
         id=dataset.id,
         name=dataset.name,
@@ -520,7 +543,8 @@ async def get_dataset(
         original_filename=dataset.original_filename,
         file_size_bytes=dataset.file_size_bytes,
         file_format=dataset.file_format,
-        status=_schema_dataset_status(dataset.status),
+        status=dataset_status,
+        starter_questions=list(questions),
         error_message=dataset.error_message,
         row_count=dataset.row_count,
         column_count=dataset.column_count,
@@ -529,7 +553,7 @@ async def get_dataset(
         created_at=dataset.created_at,
         updated_at=dataset.updated_at,
         columns=columns,
-        schema_info=dataset.schema_info,
+        schema_info=schema_info,
         quality_report=dataset.quality_report,
         profile_report=dataset.profile_report
     )

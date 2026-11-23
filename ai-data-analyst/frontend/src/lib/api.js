@@ -223,6 +223,11 @@ class APIClient {
     // Billing / Subscription APIs
     // ============================================================================
 
+    async getSystemInfo() {
+        const response = await this.request('/system/info');
+        return this._unwrapApiResponse(response);
+    }
+
     async getSubscriptionStatus() {
         const response = await this.request('/billing/status');
         return this._unwrapApiResponse(response);
@@ -294,24 +299,64 @@ class APIClient {
     // ML APIs
     // ============================================================================
 
-    async trainModel(datasetId, modelType, targetColumn, features = [], config = {}) {
-        return this.request('/ml/train', {
+    async trainModel(datasetId, targetColumn, options = {}) {
+        const response = await this.request('/ml/train', {
             method: 'POST',
             body: JSON.stringify({
                 dataset_id: datasetId,
-                model_type: modelType,
                 target_column: targetColumn,
-                features,
-                config,
+                task: options.task || null,
+                optimize: options.optimize !== false,
+                mode: options.mode || 'baseline',
+                sample_rows: options.sampleRows || null,
+                max_models: options.maxModels || null,
             }),
         });
+        return this._unwrapApiResponse(response) ?? response;
     }
 
-    async predict(modelId, data) {
-        return this.request(`/ml/predict/${modelId}`, {
+    async runAutoML(datasetId, targetColumn, options = {}) {
+        const response = await this.request('/ml/automl', {
             method: 'POST',
-            body: JSON.stringify({ data }),
+            body: JSON.stringify({
+                dataset_id: datasetId,
+                target_column: targetColumn,
+                task: options.task || null,
+                time_budget_minutes: options.timeBudgetMinutes || 60,
+                max_models: options.maxModels || 10,
+                sample_rows: options.sampleRows || null,
+                optimize: options.optimize !== false,
+            }),
         });
+        return this._unwrapApiResponse(response) ?? response;
+    }
+
+    async inferMLTask(datasetId, options = {}) {
+        const response = await this.request('/ml/task-inference', {
+            method: 'POST',
+            body: JSON.stringify({
+                dataset_id: datasetId,
+                preferred_target: options.preferredTarget || null,
+                sample_rows: options.sampleRows || 100000,
+            }),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
+    async getMLJob(jobId) {
+        return this.request(`/ml/jobs/${jobId}`);
+    }
+
+    async predict(modelName, data, modelVersion = null) {
+        const response = await this.request('/ml/predict', {
+            method: 'POST',
+            body: JSON.stringify({
+                model_name: modelName,
+                model_version: modelVersion,
+                data,
+            }),
+        });
+        return this._unwrapApiResponse(response) ?? response;
     }
 
     async listModels() {
@@ -642,7 +687,7 @@ class APIClient {
     // Auth APIs
     // ============================================================================
 
-    async register(email, password, fullName, role = 'analyst') {
+    async register(email, password, fullName, role = 'analyst', inviteCode = '') {
         return this.request('/auth/register', {
             method: 'POST',
             body: JSON.stringify({
@@ -650,6 +695,7 @@ class APIClient {
                 password,
                 full_name: fullName,
                 role,
+                invite_code: inviteCode,
             }),
         });
     }

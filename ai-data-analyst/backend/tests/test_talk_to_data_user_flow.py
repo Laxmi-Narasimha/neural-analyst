@@ -123,6 +123,68 @@ async def _upload_and_process(client: httpx.AsyncClient, headers: dict[str, str]
 
 
 @pytest.mark.asyncio
+async def test_uploaded_profile_questions_execute_without_a_model(talk_client, monkeypatch):
+    from app.api.routes import chat
+
+    class DisabledModel:
+        async def complete(self, **kwargs):
+            pytest.fail("An uploaded dataset question reached the language model")
+
+    monkeypatch.setattr(chat, "get_llm_service", lambda: DisabledModel())
+    client, headers = talk_client
+    dataset_id = await _upload_and_process(
+        client, headers, name="Branch sales",
+        csv_text="Order ID,Branch,Net sales,Invoice date\n1,East,2,2026-01-01\n"
+                 "2,East,4,2026-01-02\n3,East,,2026-02-01\n4,West,20,2026-02-02\n",
+    )
+    detail = await client.get(f"/api/v1/datasets/{dataset_id}", headers=headers)
+    assert detail.status_code == 200, detail.text
+    questions = detail.json()["data"]["starter_questions"]
+    assert any("Net sales" in q and "Branch" in q for q in questions)
+    assert any("Invoice date" in q for q in questions)
+    assert all("Order ID" not in q for q in questions)
+    for question in questions:
+        response = await client.post("/api/v1/chat", headers=headers, json={
+            "dataset_id": str(dataset_id), "message": question,
+        })
+        assert response.status_code == 200, response.text
+        answer = response.json()["data"]
+        actions = answer["agent_actions"]
+        assert len(actions) == 1
+        assert actions[0]["artifacts"][0]["dataset_version"]
+        if "highest average" in question:
+            assert actions[0]["operator"] == "segment_summary"
+            table = next(a for a in actions[0]["artifacts"] if a["artifact_type"] == "table")
+            rows = table["preview"]["preview_rows"]
+            assert [(r["group"], r["value_mean"]) for r in rows] == [("West", 20), ("East", 3)]
+            assert "**West**: 20" in answer["content"]
+            assert "**East**: 3" in answer["content"]
+            repeat = await client.post("/api/v1/chat", headers=headers, json={
+                "dataset_id": str(dataset_id), "message": question,
+            })
+            cached = repeat.json()["data"]
+            repeated_action, = cached["agent_actions"]
+            assert repeated_action["summary"]["_cache_hit"]
+            assert {a["artifact_id"] for a in repeated_action["artifacts"]} == {
+                a["artifact_id"] for a in actions[0]["artifacts"]
+            }
+            assert cached["content"] == answer["content"]
+
+    typed = await client.post("/api/v1/chat", headers=headers, json={
+        "dataset_id": str(dataset_id), "message": "show average net sales by branch",
+    })
+    assert typed.status_code == 200, typed.text
+    assert "**East**: 3" in typed.json()["data"]["content"]
+    for message in ("Who will finance the expansion?", "average UnknownMeasure by UnknownGroup"):
+        unmatched = await client.post("/api/v1/chat", headers=headers, json={
+            "dataset_id": str(dataset_id), "message": message,
+        })
+        assert unmatched.status_code == 200, unmatched.text
+        assert unmatched.json()["data"]["metadata"]["unsupported_question"]
+        assert unmatched.json()["data"]["agent_actions"] == []
+
+
+@pytest.mark.asyncio
 async def test_talk_to_data_supports_grounded_followups_and_clarifications(talk_client):
     client, headers = talk_client
     dataset_id = await _upload_and_process(

@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from app.core.config import settings
+from app.core.config import AuthMode, Environment, settings
 from app.core.exceptions import BaseApplicationException
 from app.core.logging import (
     get_logger,
@@ -28,6 +28,15 @@ from app.core.metrics import metrics_collector
 from app.services.database import init_database, close_database
 
 logger = get_logger(__name__)
+
+
+def validate_startup_security() -> None:
+    """Refuse a public JWT deployment with the development signing secret."""
+    if settings.environment != Environment.PRODUCTION or settings.auth_mode != AuthMode.JWT:
+        return
+    secret = settings.security.secret_key.get_secret_value()
+    if secret == "dev-secret-change-in-production" or len(secret) < 32:
+        raise RuntimeError("Production JWT requires SECURITY_SECRET_KEY with at least 32 characters")
 
 
 # ============================================================================
@@ -54,6 +63,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     
     try:
         # Startup
+        validate_startup_security()
         await init_database()
         
         # TODO: Initialize Redis

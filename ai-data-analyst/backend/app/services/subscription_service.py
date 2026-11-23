@@ -26,6 +26,7 @@ PREVIEW_OPERATORS = frozenset({
 
 class SubscriptionPlan(str, Enum):
     FREE = "free"
+    BETA = "beta"
     PRO = "pro"
     ENTERPRISE = "enterprise"
     BYOK = "byok"
@@ -44,8 +45,17 @@ PLAN_LIMITS: dict[str, dict[str, Any]] = {
         "talk_preview_sessions": 1,
         "compute_sessions": 0,
         "max_upload_mb": 10,
+        "monthly_uploads": 3,
         "monthly_queries": 100,
         "features": {"preview_ops", "quality_preview"},
+    },
+    SubscriptionPlan.BETA.value: {
+        "talk_preview_sessions": 50,
+        "compute_sessions": 10,
+        "max_upload_mb": 10,
+        "monthly_uploads": 5,
+        "monthly_queries": 50,
+        "features": {"preview_ops", "quality_preview", "basic_compute"},
     },
     SubscriptionPlan.PRO.value: {
         "talk_preview_sessions": None,
@@ -80,6 +90,7 @@ def _default_usage_state() -> dict[str, Any]:
         "month_key": _month_key(),
         "talk_preview_used": 0,
         "compute_sessions_used": 0,
+        "monthly_uploads": 0,
         "monthly_queries": 0,
         "last_action_at": None,
     }
@@ -197,10 +208,16 @@ class SubscriptionService:
         if plan in {SubscriptionPlan.PRO.value, SubscriptionPlan.ENTERPRISE.value, SubscriptionPlan.BYOK.value}:
             return {"allowed": True, "plan": plan}
 
+        if plan == SubscriptionPlan.BETA.value and action == UsageAction.ML_TRAIN:
+            raise QuotaExceededError("Model training is not available in the private beta.")
+
         ops = operators or []
         uses_compute = any(op not in PREVIEW_OPERATORS for op in ops) if ops else action != UsageAction.TALK_PREVIEW
 
         if action in {UsageAction.COMPUTE_SESSION, UsageAction.DATA_SPEAKS, UsageAction.ML_TRAIN} or uses_compute:
+            cap = limits.get("compute_sessions")
+            if cap is not None and int(usage.get("compute_sessions_used") or 0) >= int(cap):
+                raise QuotaExceededError("Monthly compute limit reached for this account.")
             if int(limits.get("compute_sessions") or 0) == 0:
                 preview_left = max(0, int(limits.get("talk_preview_sessions") or 0) - int(usage.get("talk_preview_used") or 0))
                 if preview_left <= 0:
@@ -227,6 +244,35 @@ class SubscriptionService:
 
         return {"allowed": True, "plan": plan, "preview_only": not uses_compute and plan == SubscriptionPlan.FREE.value}
 
+    async def assert_can_upload(self, user_id: UUID, *, file_size_bytes: int) -> None:
+        """Enforce hosted upload limits before storing or processing a file."""
+        if not self.is_enforcement_enabled():
+            return
+        user = await self.get_user_record(user_id)
+        if not user:
+            raise QuotaExceededError("User not found")
+        sub = self.get_subscription_state(user)
+        limits = self.plan_limits(self.effective_plan(user, sub))
+        max_bytes = int(limits["max_upload_mb"]) * 1024 * 1024
+        if file_size_bytes > max_bytes:
+            raise QuotaExceededError(f"This plan allows files up to {limits['max_upload_mb']} MB.")
+        monthly_cap = limits.get("monthly_uploads")
+        if monthly_cap is not None and int(sub["usage"].get("monthly_uploads") or 0) >= int(monthly_cap):
+            raise QuotaExceededError("Monthly upload limit reached on this plan.")
+
+    async def record_upload(self, user_id: UUID) -> None:
+        if not self.is_enforcement_enabled():
+            return
+        user = await self.get_user_record(user_id)
+        if not user:
+            return
+        sub = self.get_subscription_state(user)
+        usage = sub["usage"]
+        usage["monthly_uploads"] = int(usage.get("monthly_uploads") or 0) + 1
+        usage["last_action_at"] = datetime.now(timezone.utc).isoformat()
+        sub["usage"] = usage
+        await self.persist_subscription_state(user, sub)
+
     def filter_plan_for_free(self, plan_steps: list[dict[str, Any]], *, preview_only: bool) -> list[dict[str, Any]]:
         if not preview_only:
             return plan_steps
@@ -251,7 +297,7 @@ class SubscriptionService:
 
         sub = self.get_subscription_state(user)
         plan = self.effective_plan(user, sub)
-        if plan != SubscriptionPlan.FREE.value:
+        if plan not in {SubscriptionPlan.FREE.value, SubscriptionPlan.BETA.value}:
             return
 
         usage = sub["usage"]

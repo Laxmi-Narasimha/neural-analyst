@@ -5,7 +5,10 @@ import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import styles from './Header.module.css';
 
-const navLinks = [
+const PRIVATE_BETA = process.env.NEXT_PUBLIC_PRIVATE_BETA !== 'false';
+const navLinks = PRIVATE_BETA ? [
+    { href: '/pricing', label: 'Private beta' },
+] : [
     { href: '/features', label: 'Features' },
     { href: '/solutions', label: 'Solutions' },
     { href: '/pricing', label: 'Pricing' },
@@ -47,7 +50,7 @@ export default function Header() {
                         Log in
                     </Link>
                     <Link href="/register" className={styles.startBtn}>
-                        Get started
+                        {PRIVATE_BETA ? 'Use invite code' : 'Get started'}
                     </Link>
                 </div>
 
@@ -88,7 +91,7 @@ export default function Header() {
                                     className={styles.mobileStartBtn}
                                     onClick={() => setMobileOpen(false)}
                                 >
-                                    Get started
+                                    {PRIVATE_BETA ? 'Use invite code' : 'Get started'}
                                 </Link>
                             </li>
                         </ul>

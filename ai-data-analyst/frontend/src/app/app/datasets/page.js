@@ -17,6 +17,7 @@ export default function DatasetsPage() {
     const [uploadProgress, setUploadProgress] = useState(0);
     const [uploadError, setUploadError] = useState(null);
     const [uploadSuccess, setUploadSuccess] = useState(null);
+    const [processedUpload, setProcessedUpload] = useState(null);
     const fileInputRef = useRef(null);
 
     // Load datasets on mount
@@ -92,6 +93,8 @@ export default function DatasetsPage() {
     };
 
     const uploadFile = async (file) => {
+        setProcessedUpload(null);
+        setUploadSuccess(null);
         // Validate file type
         const validTypes = ['.csv', '.xlsx', '.xls', '.json', '.parquet', '.tsv'];
         const ext = '.' + file.name.split('.').pop().toLowerCase();
@@ -106,13 +109,14 @@ export default function DatasetsPage() {
             return;
         }
 
+        let progressInterval;
         try {
             setUploading(true);
             setUploadError(null);
             setUploadProgress(0);
 
             // Simulate progress (XHR progress would be better; fetch doesn't support it).
-            const progressInterval = setInterval(() => {
+            progressInterval = setInterval(() => {
                 setUploadProgress(prev => Math.min(prev + 10, 90));
             }, 200);
 
@@ -133,18 +137,17 @@ export default function DatasetsPage() {
 
             if (datasetId) {
                 const processed = await waitForDatasetProcessed(datasetId);
+                setProcessedUpload(processed);
                 setUploadSuccess(
                     `Processed ${processed?.name || file.name} (${(processed?.row_count || 0).toLocaleString()} rows, ${processed?.column_count || 0} columns)`
                 );
                 await loadDatasets();
             }
 
-            // Clear success message after 3 seconds
-            setTimeout(() => setUploadSuccess(null), 3000);
-
         } catch (error) {
             setUploadError(error.message || 'Upload failed. Please try again.');
         } finally {
+            clearInterval(progressInterval);
             setUploading(false);
             setUploadProgress(0);
         }
@@ -230,6 +233,20 @@ export default function DatasetsPage() {
                     <IconCheck size={18} />
                     {uploadSuccess}
                 </motion.div>
+            )}
+            {processedUpload?.starter_questions?.length > 0 && (
+                <section aria-label="Questions about the uploaded dataset">
+                    <h2>Ask about {processedUpload.name}</h2>
+                    <ul>
+                        {processedUpload.starter_questions.map(question => (
+                            <li key={question}>
+                                <Link prefetch={false} href={{ pathname: '/app/analysis/new', query: { dataset: processedUpload.id, prompt: question, autoSend: '1' } }}>
+                                    {question}
+                                </Link>
+                            </li>
+                        ))}
+                    </ul>
+                </section>
             )}
             {uploadError && (
                 <motion.div

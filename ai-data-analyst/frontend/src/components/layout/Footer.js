@@ -27,7 +27,16 @@ const footerLinks = {
     ],
 };
 
+const PRIVATE_BETA = process.env.NEXT_PUBLIC_PRIVATE_BETA !== 'false';
+const betaLinks = {
+    product: [{ href: '/pricing', label: 'Private beta' }, { href: '/register', label: 'Use invite code' }],
+    company: [{ href: '/contact', label: 'Contact' }],
+    resources: [],
+    legal: footerLinks.legal,
+};
+
 export default function Footer() {
+    const links = PRIVATE_BETA ? betaLinks : footerLinks;
     return (
         <footer className={styles.footer}>
             <div className={styles.container}>
@@ -37,7 +46,7 @@ export default function Footer() {
                             <span className={styles.logoText}>Neural<span className={styles.logoAccent}>Analyst</span></span>
                         </Link>
                         <p className={styles.tagline}>
-                            AI-powered data analysis that works while you sleep.
+                            {PRIVATE_BETA ? 'Explore your data and inspect the evidence.' : 'AI-powered data analysis that works while you sleep.'}
                         </p>
                     </div>
 
@@ -45,7 +54,7 @@ export default function Footer() {
                         <div className={styles.linkGroup}>
                             <h4 className={styles.linkTitle}>Product</h4>
                             <ul>
-                                {footerLinks.product.map((link) => (
+                                {links.product.map((link) => (
                                     <li key={link.href}>
                                         <Link href={link.href} className={styles.link}>{link.label}</Link>
                                     </li>
@@ -56,7 +65,7 @@ export default function Footer() {
                         <div className={styles.linkGroup}>
                             <h4 className={styles.linkTitle}>Company</h4>
                             <ul>
-                                {footerLinks.company.map((link) => (
+                                {links.company.map((link) => (
                                     <li key={link.href}>
                                         <Link href={link.href} className={styles.link}>{link.label}</Link>
                                     </li>
@@ -67,7 +76,7 @@ export default function Footer() {
                         <div className={styles.linkGroup}>
                             <h4 className={styles.linkTitle}>Resources</h4>
                             <ul>
-                                {footerLinks.resources.map((link) => (
+                                {links.resources.map((link) => (
                                     <li key={link.href}>
                                         <Link href={link.href} className={styles.link}>{link.label}</Link>
                                     </li>
@@ -78,7 +87,7 @@ export default function Footer() {
                         <div className={styles.linkGroup}>
                             <h4 className={styles.linkTitle}>Legal</h4>
                             <ul>
-                                {footerLinks.legal.map((link) => (
+                                {links.legal.map((link) => (
                                     <li key={link.href}>
                                         <Link href={link.href} className={styles.link}>{link.label}</Link>
                                     </li>

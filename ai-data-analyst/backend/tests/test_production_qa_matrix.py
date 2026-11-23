@@ -17,7 +17,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from app.core.config import AuthMode, settings
+from app.core.config import AuthMode, DeploymentMode, settings
 from app.main import create_application
 from app.services.analysis_execution import AnalysisExecutionService
 from app.services.database import db_manager
@@ -201,6 +201,44 @@ async def test_qa_auth_register_login_me_logout(qa_env):
     assert logout.status_code == 200, logout.text
     assert logout.json().get("status") == "success"
     # JWT auth is stateless — client must clear tokens (frontend api.logout does this).
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_public_registration_rejects_admin_role(qa_env):
+    client = qa_env["client"]
+    response = await client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "public-admin-attempt@example.com",
+            "password": "Str0ngPassw0rd!",
+            "role": "admin",
+        },
+    )
+    assert response.status_code == 400, response.text
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_hosted_free_account_cannot_start_ml_or_quality_jobs(qa_env):
+    old_mode = settings.deployment_mode
+    settings.deployment_mode = DeploymentMode.SAAS
+    try:
+        client, headers = qa_env["client"], qa_env["headers"]
+        ml = await client.post(
+            "/api/v1/ml/automl",
+            headers=headers,
+            json={"dataset_id": "00000000-0000-0000-0000-000000000001", "target_column": "value"},
+        )
+        assert ml.status_code == 402, ml.text
+        quality = await client.post(
+            "/api/v1/quality/validate",
+            headers=headers,
+            json={"goal": "Assess this data", "domain": "general"},
+        )
+        assert quality.status_code == 402, quality.text
+    finally:
+        settings.deployment_mode = old_mode
 
 
 @pytest.mark.integration

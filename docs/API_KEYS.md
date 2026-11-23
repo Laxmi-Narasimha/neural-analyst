@@ -88,6 +88,29 @@ See `docs/DEPLOY_SAAS.md` for Cloudflare Pages + Render setup.
 
 Scripts: `scripts/self_host.ps1` / `scripts/self_host.sh`
 
+### Compute model (we do NOT host your compute)
+
+- **pandas / sklearn / AutoML / DuckDB** all run inside **your** backend container or local Python process.
+- You can run on a laptop (local RAM), a cloud VM (AWS/GCP/Azure), or Kubernetes — same Docker image.
+- Optional `JOB_EXECUTOR=celery` adds a worker on your Redis for long AutoML jobs.
+- Check live status: `GET /api/v1/system/info` or open `/setup-keys` in the UI.
+
+### Web UI vs CLI
+
+| Approach | Best for |
+|----------|----------|
+| **Docker + Web UI** (recommended) | Upload files, chat, model comparison, artifacts |
+| **Local dev** (`uvicorn` + `npm run dev`) | Contributors hacking backend/frontend |
+| **CLI only** | Not recommended — no upload/chat UX |
+
+One-liner:
+
+```powershell
+cd neural-analyst
+.\scripts\self_host.ps1 -Detach
+# UI: http://localhost:3000  |  BYOK: http://localhost:3000/setup-keys
+```
+
 ---
 
 ## What you do NOT need for core Talk-to-Data

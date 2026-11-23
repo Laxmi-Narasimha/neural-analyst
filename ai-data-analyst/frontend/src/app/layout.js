@@ -3,13 +3,17 @@ import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
 import FluidBackground from '@/components/effects/FluidBackground';
 
+const PRIVATE_BETA = process.env.NEXT_PUBLIC_PRIVATE_BETA !== 'false';
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL
+  || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
+
 export const metadata = {
-  metadataBase: new URL('https://neuralanalyst.ai'),
+  metadataBase: new URL(SITE_URL),
   title: {
-    default: 'NeuralAnalyst - Your 24/7 AI Data Analyst',
+    default: 'NeuralAnalyst - Private Beta',
     template: '%s | NeuralAnalyst',
   },
-  description: 'NeuralAnalyst is an AI-powered data analyst that works 24/7. Analyze millions of data points, generate insights, and build ML models without coding. Free tier available. BYOK supported.',
+  description: 'NeuralAnalyst helps invited beta users explore datasets and review evidence behind analytical results.',
   keywords: [
     'AI data analyst',
     'machine learning',
@@ -29,11 +33,11 @@ export const metadata = {
   creator: 'NeuralAnalyst',
   publisher: 'NeuralAnalyst',
   robots: {
-    index: true,
-    follow: true,
+    index: !PRIVATE_BETA,
+    follow: !PRIVATE_BETA,
     googleBot: {
-      index: true,
-      follow: true,
+      index: !PRIVATE_BETA,
+      follow: !PRIVATE_BETA,
       'max-video-preview': -1,
       'max-image-preview': 'large',
       'max-snippet': -1,
@@ -42,10 +46,10 @@ export const metadata = {
   openGraph: {
     type: 'website',
     locale: 'en_US',
-    url: 'https://neuralanalyst.ai',
+    url: SITE_URL,
     siteName: 'NeuralAnalyst',
-    title: 'NeuralAnalyst - Your 24/7 AI Data Analyst',
-    description: 'AI-powered data analyst that works around the clock. 244+ features, 3.5M rows/hour, enterprise-grade security.',
+    title: 'NeuralAnalyst - Private Beta',
+    description: 'Explore datasets with traceable analytical results during our private beta.',
     images: [
       {
         url: '/og-image.png',
@@ -57,16 +61,12 @@ export const metadata = {
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'NeuralAnalyst - Your 24/7 AI Data Analyst',
-    description: 'AI-powered data analyst that works around the clock. 244+ features, no coding required.',
+    title: 'NeuralAnalyst - Private Beta',
+    description: 'Explore datasets with traceable analytical results during our private beta.',
     images: ['/twitter-image.png'],
-    creator: '@neuralanalyst',
-  },
-  verification: {
-    google: 'google-site-verification-code',
   },
   alternates: {
-    canonical: 'https://neuralanalyst.ai',
+    canonical: SITE_URL,
   },
   category: 'technology',
 };
@@ -85,28 +85,7 @@ const jsonLd = {
   name: 'NeuralAnalyst',
   applicationCategory: 'BusinessApplication',
   operatingSystem: 'Web',
-  description: 'AI-powered data analyst with 244+ features for automated data analysis, machine learning, and visualization.',
-  offers: {
-    '@type': 'Offer',
-    price: '0',
-    priceCurrency: 'USD',
-    description: 'Free tier available. Pro starts at $29/month.',
-  },
-  aggregateRating: {
-    '@type': 'AggregateRating',
-    ratingValue: '4.9',
-    ratingCount: '1250',
-    bestRating: '5',
-    worstRating: '1',
-  },
-  featureList: [
-    '244+ Data Analysis Features',
-    '24/7 Automated Analysis',
-    'Natural Language Queries',
-    'Machine Learning & AutoML',
-    'Real-time Dashboards',
-    'BYOK - Use Your Own API Keys',
-  ],
+  description: 'Private beta for dataset exploration and evidence-backed analysis.',
 };
 
 export default function RootLayout({ children }) {

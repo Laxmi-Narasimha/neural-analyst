@@ -9,6 +9,7 @@ import styles from './page.module.css';
 
 const tabs = [
     { id: 'profile', label: 'Profile', Icon: IconUser },
+    { id: 'deployment', label: 'Self-host', Icon: IconKey },
     { id: 'billing', label: 'Billing', Icon: IconKey },
     { id: 'security', label: 'Security', Icon: IconShield },
 ];
@@ -22,6 +23,7 @@ export default function SettingsPage() {
     const [subscription, setSubscription] = useState(null);
     const [error, setError] = useState(null);
     const [billingNotice, setBillingNotice] = useState(null);
+    const [systemInfo, setSystemInfo] = useState(null);
 
     useEffect(() => {
         const billing = searchParams.get('billing');
@@ -35,12 +37,14 @@ export default function SettingsPage() {
         const load = async () => {
             try {
                 setLoading(true);
-                const [me, sub] = await Promise.all([
+                const [me, sub, sys] = await Promise.all([
                     api.getCurrentUser(),
                     api.getSubscriptionStatus(),
+                    api.getSystemInfo().catch(() => null),
                 ]);
                 setProfile(me);
                 setSubscription(sub);
+                setSystemInfo(sys);
             } catch (e) {
                 setError(e?.message || 'Failed to load settings');
             } finally {
@@ -130,6 +134,44 @@ export default function SettingsPage() {
                                     readOnly
                                 />
                             </div>
+                        </div>
+                    </div>
+                )}
+
+                {activeTab === 'deployment' && (
+                    <div className={styles.section}>
+                        <h2 className={styles.sectionTitle}>Self-host & BYOK</h2>
+                        <p className={styles.sectionDesc}>
+                            All ML and EDA compute runs on your machine or Docker containers.
+                            API keys are set in <code>backend/.env</code>, not in this UI.
+                        </p>
+                        <div className={styles.billingCard}>
+                            <div className={styles.billingRow}>
+                                <span>Deployment mode</span>
+                                <strong>{systemInfo?.deployment_mode || subscription?.deployment_mode || 'self_host'}</strong>
+                            </div>
+                            <div className={styles.billingRow}>
+                                <span>LLM model</span>
+                                <strong>{systemInfo?.llm_model || '—'}</strong>
+                            </div>
+                            <div className={styles.billingRow}>
+                                <span>LLM configured</span>
+                                <strong>{systemInfo?.llm_configured ? 'Yes' : 'No — set .env keys'}</strong>
+                            </div>
+                            <div className={styles.billingRow}>
+                                <span>Compute</span>
+                                <strong>{systemInfo?.compute?.runs_on || 'your_machine'}</strong>
+                            </div>
+                            <div className={styles.billingRow}>
+                                <span>Job executor</span>
+                                <strong>{systemInfo?.job_executor || 'local'}</strong>
+                            </div>
+                        </div>
+                        <div className={styles.billingActions}>
+                            <Link href="/setup-keys" className={styles.saveBtn}>
+                                Setup guide
+                                <IconArrowRight size={16} />
+                            </Link>
                         </div>
                     </div>
                 )}

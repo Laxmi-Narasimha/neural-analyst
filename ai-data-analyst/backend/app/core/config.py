@@ -411,6 +411,14 @@ class MLConfig(BaseSettings):
     # AutoML settings
     automl_time_budget: int = Field(default=3600, ge=60, le=86400)
     automl_max_models: int = Field(default=20, ge=5, le=100)
+    automl_optimization_trials: int = Field(default=50, ge=5, le=200)
+
+    # Scale-aware sampling (millions of rows supported via reservoir + async jobs)
+    chat_training_sample_rows: int = Field(default=500_000, ge=10_000, le=5_000_000)
+    automl_training_sample_rows: int = Field(default=2_000_000, ge=50_000, le=10_000_000)
+    reservoir_chunk_rows: int = Field(default=100_000, ge=10_000, le=500_000)
+    baseline_max_models: int = Field(default=4, ge=1, le=10)
+    baseline_optimization_trials: int = Field(default=20, ge=0, le=100)
     
     # Feature engineering
     max_features_auto_select: int = Field(default=50, ge=10, le=500)
@@ -455,6 +463,12 @@ class Settings(BaseSettings):
         description="Authentication mode: local (no login, auto-user) or jwt (full auth)",
     )
 
+    registration_invite_code: Optional[SecretStr] = Field(
+        default=None,
+        validation_alias="REGISTRATION_INVITE_CODE",
+        description="When set, public registration requires this private beta invite code.",
+    )
+
     deployment_mode: DeploymentMode = Field(
         default=DeploymentMode.SELF_HOST,
         validation_alias=AliasChoices("DEPLOYMENT_MODE", "PLATFORM_MODE"),
@@ -482,7 +496,7 @@ class Settings(BaseSettings):
     # File upload settings
     max_upload_size_mb: int = Field(default=1024, ge=1, le=2048)
     allowed_extensions: list[str] = Field(
-        default=["csv", "xlsx", "xls", "json", "parquet", "pdf", "docx", "txt"]
+        default=["csv", "tsv", "xlsx", "xls", "json", "parquet", "pdf", "docx", "txt"]
     )
     upload_directory: Path = Field(default=Path("./uploads"))
     artifact_directory: Path = Field(default=Path("./artifacts"))

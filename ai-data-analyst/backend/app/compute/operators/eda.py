@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from app.compute.operators.base import OperatorContext, OperatorResult
+from app.services.retail_calendar import RetailCalendar
 
 
 def _safe_numeric_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -37,10 +38,7 @@ def _mask_pii_preview(df: pd.DataFrame, pii_cols: set[str]) -> pd.DataFrame:
 
 def _pandas_resample_freq(freq: str) -> str:
     code = str(freq or "").upper().strip()
-    # Pandas deprecated "M" (month-end) in favor of "ME". Keep API accepting "M".
-    if code == "M":
-        return "ME"
-    return code
+    return {"M": "ME", "Q": "QE", "Y": "YE"}.get(code, code)
 
 
 @dataclass(frozen=True)
@@ -997,12 +995,12 @@ class ResampleAggregateOperator:
             numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
             value_col = numeric_cols[0] if numeric_cols else None
 
-        allowed_freqs = ["D", "W", "M"]
+        allowed_freqs = ["D", "W", "M"] if freq not in {"Q", "Y"} else ["Q", "Y"]
         if freq not in allowed_freqs:
             freq = "M"
 
         sub = df[[str(time_col)] + ([str(value_col)] if value_col and str(value_col) in df.columns else [])].copy()
-        sub[str(time_col)] = pd.to_datetime(sub[str(time_col)], errors="coerce", utc=False)
+        sub[str(time_col)] = pd.to_datetime(sub[str(time_col)], errors="coerce", format="mixed", utc=True)
         sub = sub.dropna(subset=[str(time_col)])
         if sub.empty:
             out = pd.DataFrame(columns=["period", "count", "value_mean", "value_sum"])
@@ -1295,30 +1293,21 @@ class SegmentSummaryOperator:
             numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
             value_column = numeric_cols[0] if numeric_cols else None
 
-        # Always compute count; compute mean/sum when a numeric column exists.
+        # Aggregate on the original group index so nulls and strings stay distinct.
         g = df.groupby(str(group_by), dropna=False)
-        counts = g.size().rename("count")
-
-        out = counts.reset_index().rename(columns={str(group_by): "group"})
-        out["group"] = out["group"].astype(str)
+        out = g.size().to_frame("count")
 
         if value_column and str(value_column) in df.columns and pd.api.types.is_numeric_dtype(df[str(value_column)]):
-            means = g[str(value_column)].mean().rename("value_mean")
-            sums = g[str(value_column)].sum().rename("value_sum")
-            medians = g[str(value_column)].median().rename("value_median")
-            means_df = means.reset_index().rename(columns={str(group_by): "group"})
-            means_df["group"] = means_df["group"].astype(str)
-            sums_df = sums.reset_index().rename(columns={str(group_by): "group"})
-            sums_df["group"] = sums_df["group"].astype(str)
-            medians_df = medians.reset_index().rename(columns={str(group_by): "group"})
-            medians_df["group"] = medians_df["group"].astype(str)
-            out = out.merge(means_df, on="group", how="left")
-            out = out.merge(sums_df, on="group", how="left")
-            out = out.merge(medians_df, on="group", how="left")
+            values = g[str(value_column)]
+            out["value_mean"] = values.mean()
+            out["value_sum"] = values.sum()
+            out["value_median"] = values.median()
         else:
             out["value_mean"] = np.nan
             out["value_sum"] = np.nan
             out["value_median"] = np.nan
+        out = out.rename_axis("group").reset_index()
+        out["group"] = out["group"].map(lambda value: str(value) if pd.notna(value) else None)
 
         sort_by = str(params.get("sort_by") or "count").strip().lower()
         ascending = bool(params.get("ascending", False))
@@ -1326,7 +1315,9 @@ class SegmentSummaryOperator:
             sort_by = "count"
         if sort_by != "count" and sort_by not in out.columns:
             sort_by = "count"
-        if sort_by != "count" and out[sort_by].isna().all():
+        if sort_by == "value_mean":
+            out = out.dropna(subset=["value_mean"])
+        elif sort_by != "count" and out[sort_by].isna().all():
             sort_by = "count"
 
         sort_cols = [sort_by]
@@ -1950,7 +1941,52 @@ class SegmentDeepDiveOperator:
         )
 
 
+@dataclass(frozen=True)
+class MeasureAggregateOperator:
+    name: str = "measure_aggregate"
+
+    def run(self, ctx: OperatorContext, params: dict[str, Any]) -> OperatorResult:
+        measure = params["value_column"]
+        group = params.get("group_by")
+        agg = params["aggregation"]
+        if agg not in {"sum", "mean", "min", "max", "median"}:
+            raise ValueError("Unsupported aggregation")
+        if measure in _pii_columns(ctx) or group in _pii_columns(ctx):
+            raise ValueError("Select a non-sensitive analysis column")
+        values = ctx.df[measure]
+        if not pd.api.types.is_numeric_dtype(values):
+            raise ValueError(f"{measure} is not numeric")
+        if params.get("retail_unit"):
+            axis = params["time_column"]
+            if axis in _pii_columns(ctx):
+                raise ValueError("Select a non-sensitive date column")
+            cal = RetailCalendar(**params["retail_calendar"])
+            dates = pd.to_datetime(ctx.df[axis], errors="coerce", format="mixed", utc=True).dt.tz_localize(None)
+            valid = dates.dropna()
+            table = pd.DataFrame(columns=["group", "value"])
+            if not valid.empty:
+                bins = list(cal.buckets(valid.min().date(), valid.max().date(), params["retail_unit"]))
+                edges = [pd.Timestamp(b[0]) for b in bins] + [pd.Timestamp(bins[-1][1])]
+                keys = pd.cut(dates, edges, labels=[b[2] for b in bins], right=False)
+                grouped = values.groupby(keys, observed=True)
+                result = grouped.sum(min_count=1) if agg == "sum" else grouped.agg(agg)
+                table = result.rename_axis("group").reset_index(name="value")
+            return OperatorResult(tables={"result": table.head(1000)}, metrics={}, charts={},
+                                  summary={**params, "group_by": "retail " + params["retail_unit"],
+                                           "undated_rows": int(dates.isna().sum()), "groups_truncated": len(table) > 1000})
+        if group:
+            grouped = values.groupby(ctx.df[group], dropna=False, observed=True)
+            result = grouped.sum(min_count=1) if agg == "sum" else grouped.agg(agg)
+            table = result.sort_values(ascending=False, kind="stable").rename_axis("group").reset_index(name="value")
+        else:
+            value = values.sum(min_count=1) if agg == "sum" else values.agg(agg)
+            table = pd.DataFrame({"value": [value]})
+        return OperatorResult(tables={"result": table}, metrics={}, charts={},
+                              summary={"value_column": measure, "group_by": group, "aggregation": agg})
+
+
 P0_EDA_OPERATORS = [
+    MeasureAggregateOperator(),
     SchemaSnapshotOperator(),
     DatasetOverviewOperator(),
     PreviewRowsOperator(),

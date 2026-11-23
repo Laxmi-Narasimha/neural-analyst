@@ -101,17 +101,17 @@ class ComputeExecutor:
         if not rows:
             return None
 
-        # Choose the newest artifact per name to avoid returning multiple generations.
-        latest_by_name: dict[str, ArtifactModel] = {}
+        # Tables, metrics and charts may share a name within the same run.
+        latest: dict[tuple[str, str], ArtifactModel] = {}
         for a in rows:
-            key = str(a.name or "")
-            prev = latest_by_name.get(key)
+            key = (a.name, a.artifact_type.value)
+            prev = latest.get(key)
             if prev is None:
-                latest_by_name[key] = a
+                latest[key] = a
                 continue
             try:
                 if a.created_at and prev.created_at and a.created_at > prev.created_at:
-                    latest_by_name[key] = a
+                    latest[key] = a
             except Exception:
                 # If timestamps are missing or unorderable, keep the existing row.
                 continue
@@ -119,21 +119,16 @@ class ComputeExecutor:
         # Best-effort: validate local manifests exist (avoid returning broken refs when disk was pruned).
         obj = get_object_store()
         if obj.backend == ObjectStoreBackend.LOCAL:
-            existing: dict[str, ArtifactModel] = {}
-            for name, a in latest_by_name.items():
-                try:
-                    if obj.exists(str(a.manifest_path)):
-                        existing[name] = a
-                except Exception:
-                    continue
-            latest_by_name = existing
-            if not latest_by_name:
+            try:
+                if any(not obj.exists(str(a.manifest_path)) for a in latest.values()):
+                    return None
+            except Exception:
                 return None
 
-        artifacts = [self._artifact_row_to_ref(latest_by_name[k]) for k in sorted(latest_by_name.keys())]
+        artifacts = [self._artifact_row_to_ref(latest[k]) for k in sorted(latest)]
 
         summary: dict[str, Any] = {}
-        for a in latest_by_name.values():
+        for a in latest.values():
             prev = a.preview if isinstance(a.preview, dict) else {}
             if isinstance(prev, dict) and isinstance(prev.get("operator_summary"), dict):
                 summary = dict(prev.get("operator_summary") or {})
@@ -151,10 +146,17 @@ class ComputeExecutor:
         max_rows: Optional[int] = None,
         sample_rows: Optional[int] = None,
         loaded: Optional[LoadedDataset] = None,
+        row_scope: Optional[list[dict[str, Any]]] = None,
     ) -> ExecutionResult:
         context = LogContext(component="ComputeExecutor", operation="run_operator")
         params = params or {}
         stored_params = self._params_with_runtime_meta(params, max_rows=max_rows, sample_rows=sample_rows)
+        if loaded and loaded.disk_scan:
+            stored_params["_na_meta"]["execution"] = "batched_v1"
+        if loaded and loaded.schema_info.get("worksheets"):
+            stored_params["_na_meta"]["worksheets"] = loaded.schema_info["worksheets"]
+        if row_scope:
+            stored_params["_na_meta"]["row_scope"] = row_scope
 
         # Cache lookup before expensive dataset loads when possible.
         if owner_id is not None:
@@ -217,9 +219,15 @@ class ComputeExecutor:
             df=loaded.df,
             profile_report=loaded.profile_report,
             schema_info=loaded.schema_info,
+            source_file_path=str(loaded.file_path or "") or None,
+            source_file_format=str(loaded.file_format or "") or None,
         )
 
         def _run_sync():
+            if loaded.prepared:
+                prepared = loaded.prepared.get((operator_name, hash_json(params)))
+                if prepared is not None:
+                    return prepared
             return op.run(op_ctx, params)
 
         try:
@@ -319,10 +327,12 @@ class ComputeExecutor:
         owner_id: Optional[UUID] = None,
         max_rows: Optional[int] = None,
         sample_rows: Optional[int] = None,
+        loaded: Optional[LoadedDataset] = None,
+        row_scope: Optional[list[dict[str, Any]]] = None,
     ) -> list[ExecutionResult]:
         results: list[ExecutionResult] = []
         loader = DatasetLoaderService(self._session)
-        loaded = await loader.load_dataset(
+        loaded = loaded or await loader.load_dataset(
             dataset_id,
             owner_id=owner_id,
             max_rows=max_rows,
@@ -340,6 +350,7 @@ class ComputeExecutor:
                     max_rows=max_rows,
                     sample_rows=sample_rows,
                     loaded=loaded,
+                    row_scope=row_scope,
                 )
             )
         return results

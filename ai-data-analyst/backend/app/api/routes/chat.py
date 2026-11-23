@@ -3,15 +3,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
-from datetime import datetime
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 
 from app.api.schemas import (
     APIResponse,
@@ -27,10 +29,19 @@ from app.core.logging import get_logger, LogContext
 from app.core.serialization import to_jsonable
 from app.compute.executor import ComputeExecutor
 from app.compute.plans import eda_p0_plan
+from app.compute.starter_questions import measure_plan, ranked_average_plan, starter_plans
+from app.core.config import settings
+from app.models import Conversation, JobType
+from app.services.job_service import JobService
+from app.workers.dispatcher import enqueue_ml_training
 from app.services.database import get_db_session
-from app.services.dataset_loader import DatasetLoaderService
+from app.services.dataset_loader import DatasetLoaderService, file_version
+from app.services.retail_calendar import PATTERNS, SETTING_KEYS, RetailCalendar
+from app.services.workbook_scope import check_carried_columns, sheet_command, type_family, workbook_catalog, worksheet_view
+from app.services.chat_disk import needs_scan, prepare_scan
+from app.services.chat_scope import condition_leaves, ScopeEdit, ScopeQuestion, bind_conditions, describe_scope, parse_scope, scoped_dataset, verify_measurement
 from app.services.llm_service import get_llm_service, Message as LLMMessage
-from app.services.subscription_service import SubscriptionService, UsageAction
+from app.services.subscription_service import PREVIEW_OPERATORS, SubscriptionService, UsageAction
 from app.api.routes.auth import require_permission
 from app.services.auth_service import AuthUser, Permission
 
@@ -228,19 +239,16 @@ class ChatService:
             return current
         return " | ".join(snippets[-3:] + [current])
 
-    async def _persist_turn_memory(
+    def _turn_memory(
         self,
-        conversation: Any,
+        conv_ctx: dict[str, Any],
         *,
         user_message: str,
         operators: list[str],
         dataset_record: Any | None,
-    ) -> None:
-        conv_ctx_raw = conversation.context if isinstance(getattr(conversation, "context", None), dict) else {}
-        conv_ctx: dict[str, Any] = dict(conv_ctx_raw or {})
+    ) -> dict[str, Any]:
         history = conv_ctx.get("turn_history")
-        if not isinstance(history, list):
-            history = []
+        history = list(history) if isinstance(history, list) else []
         history.append(
             {
                 "user": user_message[:500],
@@ -259,15 +267,49 @@ class ChatService:
                 "column_count": getattr(dataset_record, "column_count", None),
                 "columns": col_names,
             }
-        conversation.context = conv_ctx
-        await self._session.commit()
-    
+        return conv_ctx
+
+    async def _save_scope_context(self, conversation, state: dict, *, dataset_id: UUID | None = None) -> None:
+        # Claim this turn before committing its answer. Concurrent clients must
+        # retry against the winning scope instead of silently dropping its edits.
+        revision = (conversation.context or {}).get("scope_revision")
+        result = await self._session.execute(
+            update(Conversation).where(
+                Conversation.id == conversation.id,
+                Conversation.active_dataset_id == conversation.active_dataset_id,
+                Conversation.context["scope_revision"].as_string() == revision,
+            ).values(context={**state, "scope_revision": uuid4().hex},
+                     active_dataset_id=dataset_id or conversation.active_dataset_id).execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            await self._session.rollback()
+            raise HTTPException(409, "This conversation changed during analysis. Retry your question against the latest scope.")
+
+    async def _scope_reply(self, conversation, dataset_id, reason, pending=None) -> ChatResponse:
+        payload = None
+        content = reason
+        if pending:
+            if pending.get("scope_key") in {"year", "fiscal_year"}:
+                payload = {"question_id": pending["question_id"], "param_key": pending["scope_key"], "options": [], "reason": reason}
+            else:
+                content, payload = self._format_clarification_prompt(pending)
+                if reason != pending.get("reason"):
+                    content = reason + "\n\n" + content
+            if pending.get("worksheets"):
+                content = "Worksheets: " + ", ".join(pending["worksheets"]) + ".\n\n" + content
+        reply = await self.repo.add_message(conversation_id=conversation.id, role=MessageRole.ASSISTANT.value,
+                                            content=content, agent_actions=[])
+        return ChatResponse(conversation_id=conversation.id, message_id=reply.id, content=content,
+                            clarification=payload, metadata={"dataset_id": str(dataset_id),
+                            "worksheets": (pending or {}).get("worksheets"), "clarification_required": bool(pending), "unsupported_question": not pending})
+
     async def chat(
         self,
         message: str,
         conversation_id: Optional[UUID] = None,
         dataset_id: Optional[UUID] = None,
         context: dict[str, Any] = None,
+        background_tasks: BackgroundTasks | None = None,
     ) -> ChatResponse:
         """
         Process chat message and generate response.
@@ -306,11 +348,6 @@ class ChatService:
                 dataset_id=dataset_id
             )
 
-        # Update active dataset if user explicitly sets it.
-        if dataset_id is not None and conversation.active_dataset_id != dataset_id:
-            conversation.active_dataset_id = dataset_id
-            await self._session.commit()
-
         active_dataset_id = dataset_id or conversation.active_dataset_id
         
         # Store user message
@@ -348,106 +385,304 @@ class ChatService:
                     metadata={"dataset_id": str(active_dataset_id)},
                 )
 
-            conv_ctx_raw = conversation.context if isinstance(getattr(conversation, "context", None), dict) else {}
-            conv_ctx: dict[str, Any] = dict(conv_ctx_raw or {})
-
-            effective_message = message
-            pending = conv_ctx.get("pending_clarification")
-            if isinstance(pending, dict) and str(pending.get("dataset_id") or "") == str(active_dataset_id):
-                resolved = self._resolve_pending_clarification(
-                    pending=pending,
-                    user_message=message,
-                    request_context=context,
-                    dataset_record=dataset_record,
-                )
-                if resolved is None:
-                    prompt, clarification_payload = self._format_clarification_prompt(pending)
-                    assistant_msg = await self.repo.add_message(
-                        conversation_id=conversation.id,
-                        role=MessageRole.ASSISTANT.value,
-                        content=prompt,
-                        agent_actions=[],
-                    )
-                    return ChatResponse(
-                        conversation_id=conversation.id,
-                        message_id=assistant_msg.id,
-                        content=prompt,
-                        role=MessageRole.ASSISTANT,
-                        agent_actions=[],
-                        suggestions=["Reply with the number or column name"],
-                        clarification=clarification_payload,
-                        metadata={
-                            "dataset_id": str(active_dataset_id),
-                            "clarification_required": True,
-                            "question_id": str(clarification_payload.get("question_id") or ""),
-                        },
-                    )
-
+            conv_ctx = dict(conversation.context or {}) if conversation.active_dataset_id == active_dataset_id else {}
+            version = str((dataset_record.profile_report or {}).get("file_hash") or "")
+            if not version:
+                version = await asyncio.to_thread(file_version, dataset_record)
+            last = conv_ctx.get("analysis_scope") or {}
+            pending = conv_ctx.get("pending_clarification") or {}
+            if pending.get("dataset_id") != str(active_dataset_id):
+                pending = {}
+            reset = message.strip().lower().rstrip(".!?") in {"clear filters", "clear all filters", "reset filters", "start over"}
+            changed_version = last and last.get("dataset_version") != version
+            if pending and message.strip().lower() in {"cancel", "cancel clarification"}:
+                await self._save_scope_context(conversation, {**conv_ctx, "pending_clarification": None}, dataset_id=active_dataset_id)
+                return await self._scope_reply(conversation, active_dataset_id, "Clarification cancelled. Your last completed analysis is still active.")
+            if reset or (pending and pending.get("dataset_version", version) != version):
+                pending = {}
                 conv_ctx.pop("pending_clarification", None)
-                pinned_raw = conv_ctx.get("pinned")
-                pinned: dict[str, Any] = dict(pinned_raw) if isinstance(pinned_raw, dict) else {}
-                pinned[str(resolved["param_key"])] = str(resolved["value"])
-                conv_ctx["pinned"] = pinned
-                conversation.context = conv_ctx
-                await self._session.commit()
+            if changed_version:
+                conv_ctx.pop("pinned", None)
+                if not reset:
+                    return await self._scope_reply(conversation, active_dataset_id,
+                        "The dataset version changed. Send ‘start over’ to analyze the current version with fresh filters.")
+                last = {}
 
-                plan = resolved["plan"]
-                effective_message = str(pending.get("original_user_message") or effective_message)
-            else:
-                pinned_raw = conv_ctx.get("pinned")
-                pinned = dict(pinned_raw) if isinstance(pinned_raw, dict) else {}
+            workbook = dataset_record.file_format in {"xls", "xlsx"}
+            sheets = None
+            requested = (context or {}).get("worksheets")
+            if workbook:
+                try:
+                    catalog = await workbook_catalog(dataset_record, self._session)
+                    # Conversations created before sheet selection always used the first tab.
+                    if last and not last.get("worksheets"):
+                        last = {**last, "worksheets": [catalog[0]["name"]],
+                                "column_types": {c["name"]: type_family(c["inferred_type"]) for c in catalog[0]["columns"]}}
+                    if pending and not pending.get("worksheets"):
+                        pending = {**pending, "worksheets": [catalog[0]["name"]]}
+                    message, named = sheet_command(message, catalog)
+                    if named is not None:
+                        requested = named
+                    saved = pending.get("worksheets") or last.get("worksheets")
+                    dataset_record = worksheet_view(dataset_record, catalog, saved if requested is None else requested)
+                    sheets = dataset_record.schema_info["worksheets"]
+                    if pending and pending.get("worksheets", sheets) != sheets:
+                        return await self._scope_reply(conversation, active_dataset_id,
+                            "This clarification belongs to worksheets " + ", ".join(pending["worksheets"]) +
+                            ". Answer on those sheets or send ‘cancel clarification’ before switching.", pending)
+                    if message.strip().lower() == "start over":
+                        last = {}
+                except ScopeQuestion as error:
+                    return await self._scope_reply(conversation, active_dataset_id, str(error))
+            elif requested is not None:
+                return await self._scope_reply(conversation, active_dataset_id, "Worksheet selection is available for Excel workbooks.")
+            effective_message = message
+            bindings = dict(conv_ctx.get("fiscal_calendar") or {})
+            pinned = dict(conv_ctx.get("pinned") or {})
+            if sheets and sheets != last.get("worksheets"):
+                pinned = {}
+            resolved_plan = None
+            if pending and not reset:
+                clicked = (context or {}).get("clarification")
+                if not isinstance(clicked, dict):
+                    clicked = {}
+                if clicked.get("question_id") and clicked["question_id"] != pending["question_id"]:
+                    return await self._scope_reply(conversation, active_dataset_id, pending["reason"], pending)
+                effective_message = pending["original_user_message"]
+                bindings = dict(pending.get("scope_bindings") or {})
+                if pending.get("scope_key"):
+                    choices = [o["value"] for o in pending.get("options", [])]
+                    answer = str(clicked.get("answer", message)).strip()
+                    if not clicked and answer.isdecimal() and len(answer) <= 6 and choices and 1 <= int(answer) <= len(choices):
+                        answer = choices[int(answer) - 1]
+                    matches = [c for c in choices if c.casefold() == answer.casefold()]
+                    value = answer if answer in choices else None
+                    if value is None and len(matches) == 1:
+                        value = matches[0]
+                    if pending["scope_key"] == "year" and re.fullmatch(r"[1-9]\d{3}", answer):
+                        value = answer
+                    if pending["scope_key"] == "fiscal_year" and re.fullmatch(r"(?:FY\s*)?([1-9]\d{3}(?:[-/]\d{2,4})?)", answer, re.I):
+                        value = re.sub(r"^FY\s*", "", answer, flags=re.I)
+                    if value is None:
+                        return await self._scope_reply(conversation, active_dataset_id, pending["reason"], pending)
+                    key = pending["scope_key"]
+                    if key == "fiscal_start" and value in PATTERNS:
+                        key = "retail_pattern"
+                    bindings[key] = value
+                    resolved_plan = pending.get("plan") or None
+                else:
+                    resolved = self._resolve_pending_clarification(
+                        pending=pending, user_message=message, request_context=context, dataset_record=dataset_record,
+                    )
+                    if resolved is None:
+                        return await self._scope_reply(conversation, active_dataset_id, pending["reason"], pending)
+                    pinned[resolved["param_key"]] = resolved["value"]
+                    resolved_plan = resolved["plan"]
 
-                plan = self._select_plan(message, dataset_record=dataset_record)
+            schema = dataset_record.schema_info or {}
+            retail_years = {year for c in condition_leaves(last.get("filters", [])) if "retail_anchor" in c
+                            for year in (c["retail_anchor"], c.get("retail_last_anchor", c["retail_anchor"]))}
+            if len(retail_years) == 1:
+                bindings["active_retail_anchor"] = retail_years.pop()
+            fiscal_years = {year for c in condition_leaves(last.get("filters", [])) if c.get("fiscal_start_month")
+                            for year in (c["fiscal_year_start"], c.get("fiscal_year_end", c["fiscal_year_start"]))}
+            if len(fiscal_years) == 1:
+                bindings["active_fiscal_year"] = fiscal_years.pop()
+                bindings["fiscal_active"] = True
+            elif fiscal_years:
+                bindings["fiscal_active"] = True
+            if "year" not in bindings:
+                # A follow-up quarter or month can reuse a previously confirmed calendar year.
+                prior_years = {
+                    (c["start"][:4], (datetime.fromisoformat(c["end"]) - timedelta(days=1)).strftime("%Y"))
+                    for c in condition_leaves(last.get("filters", [])) if c["op"] == "date" and not c.get("fiscal_start_month") and not c.get("retail_pattern") and c.get("start") and c.get("end")
+                }
+                if len(prior_years) == 1:
+                    first, final = prior_years.pop()
+                    if first == final:
+                        bindings["year"] = first
+            plan = resolved_plan
+            loaded = None
+            conditions = []
+            matched_rows = None
+            disk = None
+            try:
+                if not effective_message.strip() and sheets:
+                    edit = ScopeEdit("", [], [])
+                elif effective_message.strip() in starter_plans(schema):
+                    edit = ScopeEdit(effective_message.strip(), [], [])
+                else:
+                    edit = parse_scope(effective_message, schema, today=datetime.now(timezone.utc).date(), bindings=bindings)
+                if not edit.question and not edit.clear and not last and conv_ctx.get("turn_history") and plan is None:
+                    raise ScopeQuestion("This older conversation has no saved calculation or filters. Restate the calculation with its conditions once to continue.")
+                if plan is None:
+                    if edit.question:
+                        plan = self._select_plan(edit.question, dataset_record=dataset_record)
+                    else:
+                        plan = last.get("steps") or [{"operator": "dataset_overview", "params": {}}]
+                        if edit.clear and any(s["operator"].startswith("ml_") for s in plan):
+                            plan = [{"operator": "dataset_overview", "params": {}}]
+                if not plan:
+                    raise ScopeQuestion("I couldn't match the complete question to a supported calculation. Specify the measurement or comparison and its conditions.")
+                if sheets and sheets != last.get("worksheets") and last:
+                    check_carried_columns(schema, last, plan, edit)
+                verify_measurement(edit.question, schema, plan)
+                if edit.retail_group:
+                    if len(plan) != 1 or plan[0]["operator"] != "measure_aggregate":
+                        raise ScopeQuestion("Name a numeric measure, for example ‘sum Sales by retail period using Posted’.")
+                    retail = RetailCalendar.configured(bindings)
+                    choices = [c["name"] for c in schema.get("columns", []) if c.get("inferred_type") in {"date", "datetime"}
+                               and not c.get("is_potential_pii")]
+                    axis = edit.group_date or bindings.get("retail_axis")
+                    if not axis:
+                        def axes(conditions):
+                            return {c.get("column") for c in condition_leaves(conditions)
+                                    if c["op"] == "date" and c.get("column") in choices}
+                        restricted = axes(edit.conditions) or axes(last.get("filters", [])) or {
+                            s["params"]["time_column"] for s in last.get("steps", [])
+                            if s.get("params", {}).get("time_column") in choices}
+                        if len(restricted) == 1:
+                            axis = restricted.pop()
+                        elif len(choices) == 1:
+                            axis = choices[0]
+                        elif choices:
+                            raise ScopeQuestion("Which date column defines these retail groups?", key="retail_axis", choices=tuple(choices))
+                    if axis not in choices:
+                        raise ScopeQuestion("Choose a recognized date column for the retail groups.")
+                    plan = [{"operator": "measure_aggregate", "params": {**plan[0]["params"], "time_column": axis,
+                             "retail_unit": edit.retail_group, "retail_calendar": asdict(retail)}}]
+                elif any(step.get("params", {}).get("retail_unit") for step in plan):
+                    spec = asdict(RetailCalendar.configured(bindings))
+                    plan = [{**s, "params": {**s["params"], "retail_calendar": spec}}
+                            if s.get("params", {}).get("retail_unit") else s for s in plan]
                 plan, pending_new = self._maybe_clarify_plan(
-                    plan=plan,
-                    user_message=message,
-                    dataset_record=dataset_record,
-                    pinned=pinned,
+                    plan=plan, user_message=edit.question, dataset_record=dataset_record, pinned=pinned,
                 )
-                if pending_new is not None:
-                    conv_ctx["pending_clarification"] = pending_new
-                    conversation.context = conv_ctx
-                    await self._session.commit()
+                if pending_new:
+                    pending_new.update(original_user_message=effective_message, scope_bindings=bindings, dataset_version=version, worksheets=sheets)
+                    await self._save_scope_context(conversation, {**conv_ctx, "pending_clarification": pending_new}, dataset_id=active_dataset_id)
+                    return await self._scope_reply(conversation, active_dataset_id, pending_new["reason"], pending_new)
+                operator_names = [step["operator"] for step in plan]
+                gate = await self.subscription.assert_can_run(
+                    self.user_id, action=UsageAction.TALK_PREVIEW, operators=operator_names,
+                )
+                if sheets and any(s["operator"] == "ml_train_baseline" for s in plan) and self._detect_ml_mode(effective_message) == "automl" and sheets != [catalog[0]["name"]]:
+                    raise ScopeQuestion("Full AutoML jobs use the uploaded dataset’s first worksheet. Use a quick baseline to train on the selected worksheets.")
+                if sheets or await asyncio.to_thread(needs_scan, dataset_record):
+                    disk = await asyncio.to_thread(prepare_scan, dataset_record, edit, last.get("filters", []), plan, bindings)
+                    loaded, conditions = disk.loaded, disk.filters
+                    matched_rows = disk.rows if conditions else None
+                elif edit.conditions or (last.get("filters") and not edit.clear):
+                    loaded = await self.dataset_loader.load_dataset(active_dataset_id, owner_id=self.user_id)
+                    if version and version != loaded.version_hash:
+                        raise ScopeQuestion("The dataset changed while planning. Please retry on its current version.")
+                    conditions = await asyncio.to_thread(bind_conditions, edit, last.get("filters", []), loaded, plan, bindings)
+                    if conditions:
+                        if any(s["operator"] in {"ml_train_baseline", "ml_task_inference"} for s in plan):
+                            raise ScopeQuestion("This modeling workflow needs a versioned filtered dataset. Save the filtered rows as a dataset before training.")
+                        loaded = await asyncio.to_thread(scoped_dataset, loaded, conditions)
+                        matched_rows = len(loaded.df)
+                    else:
+                        loaded = None
+            except ScopeQuestion as error:
+                pending_new = None
+                if error.key and (error.choices or error.key in {"year", "fiscal_year"}):
+                    pending_new = {
+                        "dataset_id": str(active_dataset_id), "dataset_version": version,
+                        "question_id": uuid4().hex, "scope_key": error.key, "param_key": error.key,
+                        "reason": str(error), "options": [{"label": c, "value": c} for c in error.choices],
+                        "original_user_message": effective_message, "scope_bindings": bindings, "plan": plan, "worksheets": sheets,
+                    }
+                await self._save_scope_context(conversation, {**conv_ctx, "pending_clarification": pending_new}, dataset_id=active_dataset_id)
+                return await self._scope_reply(conversation, active_dataset_id, str(error), pending_new)
 
-                    prompt, clarification_payload = self._format_clarification_prompt(pending_new)
-                    assistant_msg = await self.repo.add_message(
-                        conversation_id=conversation.id,
-                        role=MessageRole.ASSISTANT.value,
-                        content=prompt,
-                        agent_actions=[],
-                    )
-                    return ChatResponse(
-                        conversation_id=conversation.id,
-                        message_id=assistant_msg.id,
-                        content=prompt,
-                        role=MessageRole.ASSISTANT,
-                        agent_actions=[],
-                        suggestions=["Reply with the number or column name"],
-                        clarification=clarification_payload,
-                        metadata={
-                            "dataset_id": str(active_dataset_id),
-                            "clarification_required": True,
-                            "question_id": str(clarification_payload.get("question_id") or ""),
-                        },
-                    )
-
-            operator_names = [str(step.get("operator") or "") for step in plan if isinstance(step, dict)]
-            gate = await self.subscription.assert_can_run(
-                self.user_id,
-                action=UsageAction.TALK_PREVIEW,
-                operators=operator_names,
-            )
             plan = self.subscription.filter_plan_for_free(
                 plan,
                 preview_only=bool(gate.get("preview_only")),
             )
 
+            ml_mode = self._detect_ml_mode(effective_message)
+            target_col = (
+                str(pinned.get("target_column") or "").strip()
+                or self._extract_target_column(effective_message, dataset_record=dataset_record)
+            )
+
+            if (ml_mode == "automl" and target_col and background_tasks is not None
+                    and any(step.get("operator") == "ml_train_baseline" for step in plan)):
+                await self.subscription.assert_can_run(
+                    self.user_id,
+                    action=UsageAction.ML_TRAIN,
+                )
+                jobs = JobService(self._session)
+                job = await jobs.create(
+                    owner_id=self.user_id,
+                    job_type=JobType.ML_TRAINING,
+                    dataset_id=active_dataset_id,
+                    payload={
+                        "target_column": target_col,
+                        "mode": "automl",
+                        "source": "chat",
+                        "sample_rows": settings.ml.automl_training_sample_rows,
+                    },
+                    status_message="Queued AutoML from chat",
+                )
+                enqueue_ml_training(
+                    background_tasks=background_tasks,
+                    job_id=job.id,
+                    owner_id=self.user_id,
+                    dataset_id=active_dataset_id,
+                    target_column=target_col,
+                    sample_rows=settings.ml.automl_training_sample_rows,
+                    max_models=settings.ml.automl_max_models,
+                    optimize=True,
+                )
+                content = (
+                    f"I've started a **full AutoML job** to train and tune models predicting **{target_col}**.\n\n"
+                    f"- **Job ID:** `{job.id}`\n"
+                    f"- **Sample size:** up to {settings.ml.automl_training_sample_rows:,} representative rows "
+                    f"(scales to multi-million row datasets via reservoir sampling)\n"
+                    f"- **Includes:** model comparison, cross-validation, and hyperparameter tuning\n\n"
+                    f"Track progress under **Jobs** or poll `/api/v1/ml/jobs/{job.id}`."
+                )
+                await self._save_scope_context(conversation, {
+                    **conv_ctx, "pending_clarification": None, "pinned": pinned,
+                    "analysis_scope": {"dataset_id": str(active_dataset_id), "dataset_version": version,
+                                       "steps": plan, "filters": [], "matched_rows": None, "worksheets": sheets},
+                }, dataset_id=active_dataset_id)
+                assistant_msg = await self.repo.add_message(
+                    conversation_id=conversation.id,
+                    role=MessageRole.ASSISTANT.value,
+                    content=content,
+                    agent_actions=[{"type": "ml_job", "job_id": str(job.id), "target_column": target_col}],
+                )
+                return ChatResponse(
+                    conversation_id=conversation.id,
+                    message_id=assistant_msg.id,
+                    content=content,
+                    role=MessageRole.ASSISTANT,
+                    agent_actions=[{"type": "ml_job", "job_id": str(job.id)}],
+                    suggestions=["Show feature importance when the job completes", "Run a quick baseline model now"],
+                    metadata={"dataset_id": str(active_dataset_id), "ml_job_id": str(job.id)},
+                )
+
             sample_rows = 200_000
+            if conditions or "measure_aggregate" in operator_names:
+                sample_rows = None
+            elif {"ml_train_baseline", "ml_task_inference"}.intersection(operator_names):
+                sample_rows = settings.ml.chat_training_sample_rows
+            if disk:
+                sample_rows = len(loaded.df) if disk.sampled_ops else None
+            if loaded is None:
+                loaded = await self.dataset_loader.load_dataset(active_dataset_id, owner_id=self.user_id, sample_rows=sample_rows)
+            if version != loaded.version_hash:
+                return await self._scope_reply(conversation, active_dataset_id, "The dataset version changed during this turn. Please retry.")
             results = await self.executor.run_plan(
                 dataset_id=active_dataset_id,
-                plan=plan,
+                plan=plan if matched_rows != 0 else [{"operator": "dataset_overview", "params": {}}],
                 owner_id=self.user_id,
                 sample_rows=sample_rows,
+                loaded=loaded,
+                row_scope=conditions,
             )
 
             agent_actions = to_jsonable(
@@ -468,7 +703,46 @@ class ChatService:
                 sample_rows=sample_rows,
                 results=results,
             )
-            suggestions = self._generate_suggestions(effective_message, content)
+            scope = {"dataset_id": str(active_dataset_id), "dataset_version": version, "steps": plan,
+                     "filters": conditions, "matched_rows": matched_rows, "analyzed_rows": disk.rows if disk and not disk.sampled_ops else len(loaded.df)}
+            if conditions:
+                content = (f"Applied filters: {describe_scope(conditions)}. Matched {matched_rows:,} rows.\n\n" +
+                           (content if matched_rows else "No rows match these conditions."))
+            elif edit.clear or edit.remove:
+                content = "All rows are in scope.\n\n" + content
+            for result in results:
+                if result.summary.get("undated_rows"):
+                    content += f"\n\nRetail grouping excluded {result.summary['undated_rows']:,} rows without a valid date."
+            if disk:
+                scope.update(execution="batched", scanned_matching_rows=disk.rows, sampled_operators=disk.sampled_ops)
+                if disk.sampled_ops:
+                    content = (f"Sample-based analysis ({', '.join(disk.sampled_ops)}): {len(loaded.df):,} rows sampled "
+                               f"from {disk.rows:,} matching rows.\n\n" + content)
+                if any(r.summary.get("groups_truncated") for r in results):
+                    content += "\n\nThe evidence table is limited to 1,000 groups."
+            if not disk and not conditions and dataset_record.row_count is not None and len(loaded.df) < dataset_record.row_count:
+                content += f"\n\nCompute input: {len(loaded.df):,} sampled rows out of {dataset_record.row_count:,}."
+            if sheets:
+                scope.update(worksheets=sheets, worksheet_column=schema["worksheet_column"],
+                             column_types={c["name"]: type_family(c["inferred_type"]) for c in schema["columns"]})
+                note = "Worksheets: " + ", ".join(sheets) + "."
+                if len(sheets) > 1:
+                    note += f" Rows are combined by column name. Group by {schema['worksheet_column']} to compare worksheets."
+                    layouts = [{c["name"] for c in entry["columns"]} for entry in catalog if entry["name"] in sheets]
+                    if any(layout != layouts[0] for layout in layouts[1:]):
+                        note += " Columns absent from a worksheet are treated as blank."
+                content = note + "\n\n" + content
+            state = self._turn_memory(
+                {**conv_ctx, "pinned": pinned, "pending_clarification": None, "analysis_scope": scope,
+                 "fiscal_calendar": {k: bindings[k] for k in ("fiscal_start", "fiscal_label", *SETTING_KEYS) if k in bindings}},
+                user_message=effective_message, operators=operator_names, dataset_record=dataset_record,
+            )
+            await self._save_scope_context(conversation, state, dataset_id=active_dataset_id)
+            used = {r.operator_name for r in results}
+            suggestions = [
+                question for question, step in starter_plans(dataset_record.schema_info).items()
+                if step["operator"] not in used and (not gate.get("preview_only") or step["operator"] in PREVIEW_OPERATORS)
+            ][:3]
 
             assistant_msg = await self.repo.add_message(
                 conversation_id=conversation.id,
@@ -482,13 +756,6 @@ class ChatService:
                 action=UsageAction.TALK_PREVIEW,
                 operators=operator_names,
             )
-            await self._persist_turn_memory(
-                conversation,
-                user_message=effective_message,
-                operators=operator_names,
-                dataset_record=dataset_record,
-            )
-
             return ChatResponse(
                 conversation_id=conversation.id,
                 message_id=assistant_msg.id,
@@ -500,6 +767,7 @@ class ChatService:
                 metadata={
                     "dataset_id": str(active_dataset_id),
                     "sample_rows": sample_rows,
+                    "analysis_scope": scope,
                     "plan": gate.get("plan"),
                     "preview_only": gate.get("preview_only", False),
                 },
@@ -530,7 +798,26 @@ class ChatService:
                 metadata={"no_dataset": True, "blocked_plan": data_plan},
             )
 
-        # Otherwise, fall back to an LLM-only assistant (no dataset context).
+        # Hosted chat is scoped to datasets; avoid open-ended, unmetered LLM calls.
+        if self.subscription.is_enforcement_enabled():
+            content = "Upload or select a dataset to start talking to your data."
+            assistant_msg = await self.repo.add_message(
+                conversation_id=conversation.id,
+                role=MessageRole.ASSISTANT.value,
+                content=content,
+                agent_actions=[],
+            )
+            return ChatResponse(
+                conversation_id=conversation.id,
+                message_id=assistant_msg.id,
+                content=content,
+                role=MessageRole.ASSISTANT,
+                agent_actions=[],
+                suggestions=["Upload a dataset", "Open Datasets"],
+                metadata={"no_dataset": True},
+            )
+
+        # Self-hosted mode can use the general LLM assistant without a dataset.
         messages = await self.repo.get_messages(conversation.id, limit=20)
         llm_messages = self._build_llm_messages(messages, None, context)
 
@@ -643,6 +930,7 @@ class ChatService:
         plan_out: list[dict[str, Any]] = []
         pinned_group = str(pinned.get("group_by") or "").strip() or None
         pinned_time = str(pinned.get("time_column") or "").strip() or None
+        pinned_target = str(pinned.get("target_column") or "").strip() or None
 
         schema_cols = [str(c.get("name") or "") for c in self._schema_columns(dataset_record) if c.get("name")]
         schema_set = {c for c in schema_cols if c}
@@ -682,6 +970,38 @@ class ChatService:
                             ],
                         )
                         return plan, pending
+
+            if op == "ml_train_baseline":
+                target = str(params.get("target_column") or "").strip() or None
+                if target and target in schema_set:
+                    params["target_column"] = target
+                elif pinned_target and pinned_target in schema_set:
+                    params["target_column"] = pinned_target
+                else:
+                    mentioned = [
+                        c
+                        for c in schema_cols
+                        if self._message_mentions_column(user_message, c)
+                    ]
+                    if len(mentioned) == 1:
+                        params["target_column"] = mentioned[0]
+                    else:
+                        numeric_or_cat = self._column_candidates(dataset_record, kind="categorical")[:6]
+                        numeric_cols = self._column_candidates(dataset_record, kind="numeric")[:6]
+                        options = list(dict.fromkeys(numeric_or_cat + numeric_cols + schema_cols[:8]))[:8]
+                        if len(options) >= 2:
+                            pending = self._build_pending_clarification(
+                                dataset_id=str(getattr(dataset_record, "id", "") or ""),
+                                original_user_message=user_message,
+                                operator=op,
+                                param_key="target_column",
+                                options=options,
+                                reason="I need to know which column to predict (the target variable).",
+                                plan_template=plan_out
+                                + [{"operator": op, "params": params}]
+                                + [s for s in plan[len(plan_out) + 1 :] if isinstance(s, dict)],
+                            )
+                            return plan, pending
 
             if op == "resample_aggregate":
                 time_col = str(params.get("time_column") or "").strip() or None
@@ -791,7 +1111,7 @@ class ChatService:
             answer_raw = ctx_cl.get("answer") or ctx_cl.get(param_key)
 
         msg = str(user_message or "").strip()
-        if answer_raw is None and msg.isdigit():
+        if answer_raw is None and msg.isdecimal() and len(msg) <= 6:
             idx = int(msg) - 1
             if 0 <= idx < len(options):
                 opt = options[idx] if isinstance(options[idx], dict) else {}
@@ -817,12 +1137,7 @@ class ChatService:
 
         chosen = option_map.get(ans.lower())
         if chosen is None:
-            # Try substring match for convenience (user may answer "use order_date")
-            low = ans.lower()
-            for k, v in option_map.items():
-                if k and k in low:
-                    chosen = v
-                    break
+            chosen = option_map.get(re.sub(r"^(?:please )?use\s+", "", ans.lower()))
 
         if chosen is None:
             return None
@@ -846,9 +1161,101 @@ class ChatService:
 
         return {"plan": plan_out, "param_key": param_key, "value": chosen}
 
-    def _select_plan(self, user_message: str, *, dataset_record: Any | None = None) -> list[dict[str, Any]]:
+    def _is_ml_intent(self, user_message: str) -> bool:
+        msg = (user_message or "").lower()
+        keys = [
+            "train a model",
+            "train model",
+            "machine learning",
+            "automl",
+            "hyperparameter",
+            "hyper parameter",
+            "predict ",
+            "prediction model",
+            "classification model",
+            "regression model",
+            "feature importance",
+            "xgboost",
+            "random forest",
+            " tune ",
+            "tuning",
+            "build a model",
+            "model to predict",
+        ]
+        return any(k in msg for k in keys) or (
+            any(k in msg for k in [" train ", " model ", " ml "])
+            and any(k in msg for k in ["predict", "target", "churn", "classify", "regression", "forecast"])
+        )
+
+    def _detect_ml_mode(self, user_message: str) -> str | None:
+        if not self._is_ml_intent(user_message):
+            return None
+        msg = (user_message or "").lower()
+        if any(
+            k in msg
+            for k in [
+                "automl",
+                "hyperparameter",
+                "hyper parameter",
+                "full train",
+                "compare models",
+                "tune ",
+                "tuning",
+                "optimize model",
+            ]
+        ):
+            return "automl"
+        return "baseline"
+
+    def _extract_target_column(self, user_message: str, *, dataset_record: Any | None) -> str | None:
         msg_raw = user_message or ""
         msg = msg_raw.lower()
+        for col in self._schema_columns(dataset_record):
+            name = str(col.get("name") or "")
+            if not name:
+                continue
+            if self._message_mentions_column(msg_raw, name):
+                return name
+        m = re.search(r"(?:predict|forecast|target|for)\s+([a-zA-Z_][a-zA-Z0-9_]*)", msg)
+        if m:
+            candidate = m.group(1)
+            for col in self._schema_columns(dataset_record):
+                if str(col.get("name") or "").lower() == candidate.lower():
+                    return str(col.get("name"))
+        return None
+
+    def _select_plan(self, user_message: str, *, dataset_record: Any | None = None) -> list[dict[str, Any]]:
+        msg_raw = user_message or ""
+        if re.fullmatch(r"(?:count(?: of)?|total|how many|number of) (?:rows|records)", msg_raw.strip(" .!?"), re.I):
+            return [{"operator": "dataset_overview", "params": {}}]
+        if dataset_record is not None:
+            schema = getattr(dataset_record, "schema_info", None)
+            for question, step in starter_plans(schema).items():
+                if question.casefold().rstrip("?") == msg_raw.strip().casefold().rstrip("?"):
+                    return [step]
+            ranking = ranked_average_plan(msg_raw, schema)
+            if ranking is not None:
+                return ranking
+            metric = measure_plan(msg_raw, schema)
+            if metric is not None:
+                return metric
+        msg = msg_raw.lower()
+
+        if self._is_ml_intent(msg_raw):
+            target = self._extract_target_column(msg_raw, dataset_record=dataset_record)
+            mode = self._detect_ml_mode(msg_raw)
+            optimize = mode != "baseline" or any(k in msg for k in ["tune", "tuning", "hyperparameter"])
+            if not target:
+                return [{"operator": "ml_task_inference", "params": {}}]
+            return [
+                {
+                    "operator": "ml_train_baseline",
+                    "params": {
+                        "target_column": target,
+                        "optimize": optimize,
+                    },
+                }
+            ]
 
         schema_cols: list[str] = []
         col_types: dict[str, str] = {}
@@ -905,6 +1312,10 @@ class ChatService:
             freq = "W"
         elif any(k in msg for k in ["monthly", "per month"]):
             freq = "M"
+        elif any(k in msg for k in ["quarterly", "per quarter"]):
+            freq = "Q"
+        elif any(k in msg for k in ["yearly", "per year"]):
+            freq = "Y"
 
         def _first_by_type(substrings: list[str]) -> str | None:
             for c in mentioned_cols:
@@ -935,9 +1346,6 @@ class ChatService:
         ):
             return [{"operator": "dataset_overview", "params": {}}]
 
-        if any(k in msg for k in ["eda", "analyze", "analysis"]) and not any(k in msg for k in ["top", "group by"]):
-            return eda_p0_plan()
-
         plan: list[dict[str, Any]] = []
         if any(k in msg for k in ["overview", "summarize", "summary"]):
             plan.append({"operator": "dataset_overview", "params": {}})
@@ -946,7 +1354,7 @@ class ChatService:
             plan.append({"operator": "schema_snapshot", "params": {}})
         if any(k in msg for k in ["preview", "head", "sample rows", "show rows"]):
             plan.append({"operator": "preview_rows", "params": {"limit": 25}})
-        if any(k in msg for k in ["missing", "null", "na", "nan"]):
+        if re.search(r"\b(?:missing|nulls?|na|n/a|nan)\b", msg):
             plan.append({"operator": "missingness_scan", "params": {}})
         if any(k in msg for k in ["unique", "uniqueness", "duplicate", "duplicates", "cardinality", "key candidate"]):
             plan.append({"operator": "uniqueness_scan", "params": {"max_columns": 200}})
@@ -982,17 +1390,58 @@ class ChatService:
         if "outlier" in msg or "anomaly" in msg:
             plan.append({"operator": "outlier_scan", "params": {"max_columns": 25}})
 
+        if any(k in msg for k in ["sentiment", "opinion", "positive", "negative review", "text tone"]):
+            plan.append({"operator": "sentiment_scan", "params": {"max_columns": 3}})
+        if any(k in msg for k in ["forecast", "predict next", "projection", "future trend"]) and not self._is_ml_intent(msg_raw):
+            plan.append({"operator": "forecast_scan", "params": {"horizon": 8, "method": "ensemble"}})
+        if any(k in msg for k in ["a/b", "ab test", "a b test", "experiment", "variant", "control group"]):
+            plan.append({"operator": "ab_test_scan", "params": {}})
+        if any(k in msg for k in ["cohort", "retention", "churn cohort"]):
+            plan.append({"operator": "cohort_scan", "params": {"max_periods": 8}})
+        if any(k in msg for k in ["funnel", "conversion", "drop-off", "drop off"]):
+            plan.append({"operator": "funnel_scan", "params": {}})
+        if any(k in msg for k in ["rfm", "customer segment", "customer segments", "monetary value"]):
+            plan.append({"operator": "rfm_scan", "params": {}})
+        if any(k in msg for k in ["cluster", "clustering", "k-means", "k means", "segments unsupervised"]):
+            plan.append({"operator": "clustering_scan", "params": {"n_clusters": 4}})
+        if any(k in msg for k in ["chart", "visualize", "visualization", "plot", "graph", "histogram"]):
+            plan.append({"operator": "smart_viz_scan", "params": {"max_charts": 3}})
+        if any(k in msg for k in ["heatmap", "correlation heatmap", "corr heatmap"]):
+            plan.append({"operator": "correlation_heatmap", "params": {}})
+        if "distribution" in msg and any(k in msg for k in ["chart", "plot", "histogram", "visualize"]):
+            plan.append({"operator": "distribution_chart", "params": {}})
+        if any(
+            k in msg
+            for k in [
+                "million rows",
+                "full table count",
+                "exact row count",
+                "duckdb",
+                "sql aggregate",
+                "without loading",
+            ]
+        ):
+            plan.append({"operator": "duckdb_profile", "params": {}})
+
         if len(plan) > 4:
             plan = plan[:4]
 
-        return plan or eda_p0_plan()
+        if plan:
+            return plan
+        if dataset_record is None or re.fullmatch(
+            r"(?:run |do |perform |start )?(?:an? )?(?:eda|exploratory (?:data )?analysis|data speaks)"
+            r"|(?:please )?(?:analy[sz]e|explore|summari[sz]e) (?:this|my|the) (?:dataset|data|file)"
+            r"|make (?:the|my) data speak", msg.strip(" .!?")
+        ):
+            return eda_p0_plan()
+        return []
 
     def _format_grounded_response(
         self,
         *,
         user_message: str,
         dataset_id: UUID,
-        sample_rows: int,
+        sample_rows: int | None,
         results: list[Any],
     ) -> str:
         """Format compute results into natural, conversational language."""
@@ -1029,7 +1478,14 @@ class ChatService:
             preview_rows, _ = _first_table_preview(r)
             summary = getattr(r, "summary", {}) or {}
 
-            if op == "dataset_overview" and preview_rows:
+            if op == "measure_aggregate" and preview_rows:
+                label = f"{summary['aggregation'].title()} of **{summary['value_column']}**"
+                if summary.get("group_by"):
+                    items = [f"- {row.get('group')}: {_fmt_number(row.get('value'))}" for row in preview_rows[:5]]
+                    sections.append(f"{label} by **{summary['group_by']}** (first groups):\n" + "\n".join(items))
+                else:
+                    sections.append(f"{label}: {_fmt_number(preview_rows[0].get('value'))}.")
+            elif op == "dataset_overview" and preview_rows:
                 row = preview_rows[0] if isinstance(preview_rows[0], dict) else {}
                 rows_count = _fmt_number(row.get('rows'))
                 cols_count = _fmt_number(row.get('columns'))
@@ -1079,8 +1535,19 @@ class ChatService:
                 if keys:
                     sections.append(f"Potential primary key columns: {', '.join(keys)}.")
 
-            elif op == "segment_summary" and preview_rows:
+            elif op == "segment_summary" and (preview_rows or summary.get("sort_by") == "value_mean"):
                 group_by = summary.get("group_by") if isinstance(summary, dict) else None
+                if summary.get("sort_by") == "value_mean":
+                    metric = summary.get("value_column")
+                    lines = [
+                        f"  • **{row['group'] if row['group'] is not None else '(missing)'}**: {_fmt_number(row['value_mean'])}"
+                        for row in preview_rows[:5] if row.get("value_mean") is not None
+                    ]
+                    sections.append(
+                        f"Highest average **{metric}** by **{group_by}** in the analyzed rows:\n" + "\n".join(lines)
+                        if lines else f"No group had a usable value for **{metric}** in the analyzed rows."
+                    )
+                    continue
                 header = f"Top groups by **{group_by}**" if group_by else "Top groups"
                 items = []
                 for row in preview_rows[:5]:
@@ -1168,6 +1635,156 @@ class ChatService:
 
             elif op == "preview_rows" and preview_rows:
                 sections.append(f"Here are the first {len(preview_rows)} rows of your data (see the table artifact for the full preview).")
+
+            elif op == "ml_task_inference" and preview_rows:
+                items = []
+                for row in preview_rows[:5]:
+                    if not isinstance(row, dict):
+                        continue
+                    items.append(
+                        f"  • **{row.get('column')}** — {row.get('inferred_task')} "
+                        f"(score {float(row.get('score') or 0):.2f})"
+                    )
+                selected = summary.get("selected_target") if isinstance(summary, dict) else None
+                if items:
+                    lead = (
+                        f"Top target candidates (recommended: **{selected}**):" if selected else "Top target candidates:"
+                    )
+                    sections.append(f"{lead}\n" + "\n".join(items))
+                if isinstance(summary, dict) and summary.get("warnings"):
+                    sections.append("Warnings: " + "; ".join(str(w) for w in summary.get("warnings")[:3]))
+
+            elif op == "ml_train_baseline":
+                best = summary.get("best_model") if isinstance(summary, dict) else None
+                target = summary.get("target_column") if isinstance(summary, dict) else None
+                task = summary.get("task") if isinstance(summary, dict) else None
+                metrics = summary.get("test_metrics") if isinstance(summary, dict) else {}
+                cv_mean = summary.get("cv_mean") if isinstance(summary, dict) else None
+                registered = summary.get("registered_model") if isinstance(summary, dict) else None
+                lines = [
+                    f"I trained and compared models to predict **{target}** ({task}).",
+                    f"**Best model:** {best}",
+                ]
+                if cv_mean is not None:
+                    lines.append(f"**Cross-validation score:** {float(cv_mean):.4f}")
+                if isinstance(metrics, dict) and metrics:
+                    metric_bits = [f"{k}={float(v):.4f}" for k, v in list(metrics.items())[:4]]
+                    lines.append(f"**Test metrics:** {', '.join(metric_bits)}")
+                if registered:
+                    lines.append(f"Model registered as **{registered}** (ready for predictions).")
+                importance = summary.get("feature_importance") if isinstance(summary, dict) else {}
+                if isinstance(importance, dict) and importance:
+                    top_feats = list(importance.items())[:5]
+                    feat_lines = [f"  • **{k}**: {float(v):.4f}" for k, v in top_feats]
+                    lines.append("**Top features:**\n" + "\n".join(feat_lines))
+                sampled = summary.get("sample_rows")
+                if sampled:
+                    lines.append(f"Trained on **{int(sampled):,}** representative rows from your dataset.")
+                sections.append("\n".join(lines))
+
+            elif op == "sentiment_scan" and preview_rows:
+                items = []
+                for row in preview_rows[:5]:
+                    if not isinstance(row, dict):
+                        continue
+                    items.append(
+                        f"  • **{row.get('column')}**: "
+                        f"{float(row.get('positive_pct') or 0):.1f}% positive, "
+                        f"{float(row.get('negative_pct') or 0):.1f}% negative "
+                        f"(avg polarity {float(row.get('avg_score') or 0):.3f})"
+                    )
+                if items:
+                    sections.append("Sentiment scan:\n" + "\n".join(items))
+
+            elif op == "forecast_scan":
+                time_col = summary.get("time_column") if isinstance(summary, dict) else None
+                value_col = summary.get("value_column") if isinstance(summary, dict) else None
+                method = summary.get("method") if isinstance(summary, dict) else None
+                horizon = summary.get("horizon") if isinstance(summary, dict) else None
+                lead = f"Forecast for **{value_col}** over **{time_col}**"
+                if method:
+                    lead += f" using **{method}**"
+                if horizon:
+                    lead += f" ({horizon} periods ahead)"
+                items = []
+                for row in preview_rows[:6]:
+                    if not isinstance(row, dict):
+                        continue
+                    if row.get("note"):
+                        items.append(f"  • {row.get('note')}")
+                        continue
+                    period = row.get("date") or row.get("period") or row.get("ds")
+                    value = row.get("yhat") or row.get("forecast") or row.get("value")
+                    if period is not None or value is not None:
+                        items.append(f"  • {period}: {_fmt_number(value)}")
+                metrics = summary.get("metrics") if isinstance(summary, dict) else {}
+                if isinstance(metrics, dict) and metrics:
+                    metric_bits = [f"{k}={float(v):.4f}" for k, v in list(metrics.items())[:3] if v is not None]
+                    if metric_bits:
+                        lead += f"\nBacktest metrics: {', '.join(metric_bits)}"
+                if items:
+                    sections.append(f"{lead}:\n" + "\n".join(items))
+                elif lead:
+                    sections.append(lead)
+
+            elif op == "ab_test_scan" and preview_rows:
+                row = preview_rows[0] if isinstance(preview_rows[0], dict) else {}
+                if row:
+                    sig = "significant" if row.get("significant") else "not significant"
+                    sections.append(
+                        f"A/B test on **{row.get('metric')}**: "
+                        f"**{row.get('variant_a')}** vs **{row.get('variant_b')}** — "
+                        f"p = {float(row.get('p_value') or 0):.4f} ({sig}), "
+                        f"lift {float(row.get('lift_pct') or 0):+.2f}%."
+                    )
+
+            elif op == "duckdb_profile" and preview_rows:
+                row = preview_rows[0] if isinstance(preview_rows[0], dict) else {}
+                engine = summary.get("engine") if isinstance(summary, dict) else row.get("engine")
+                count = row.get("row_count") or row.get("rows") or summary.get("row_count")
+                cols = row.get("column_count") or row.get("columns") or summary.get("column_count")
+                parts = []
+                if count is not None:
+                    parts.append(f"**{_fmt_number(count)} rows**")
+                if cols is not None:
+                    parts.append(f"**{_fmt_number(cols)} columns**")
+                if parts:
+                    label = "Full-dataset profile (DuckDB pushdown)" if engine == "duckdb_pushdown" else "Dataset profile"
+                    sections.append(f"{label}: {' across '.join(parts)}.")
+
+            elif op == "cohort_scan" and isinstance(summary, dict):
+                sections.append(
+                    f"Cohort retention: **{summary.get('n_customers', 'n/a')}** customers across "
+                    f"**{summary.get('n_cohorts', 'n/a')}** cohorts. "
+                    f"Period-1 retention ~ **{float(summary.get('avg_retention_period_1', 0)) * 100:.1f}%**."
+                )
+
+            elif op == "funnel_scan" and preview_rows:
+                items = []
+                for row in preview_rows[:6]:
+                    if not isinstance(row, dict):
+                        continue
+                    items.append(f"  • **{row.get('step')}**: {_fmt_number(row.get('count'))} ({row.get('overall_rate')}% overall)")
+                if items:
+                    conv = summary.get("overall_conversion_pct") if isinstance(summary, dict) else None
+                    lead = f"Funnel conversion **{conv}%** end-to-end:" if conv is not None else "Funnel steps:"
+                    sections.append(f"{lead}\n" + "\n".join(items))
+
+            elif op == "rfm_scan" and isinstance(summary, dict):
+                sections.append(
+                    f"RFM segmentation: **{summary.get('n_customers', 'n/a')}** customers in "
+                    f"**{summary.get('segments', 0)}** segments."
+                )
+
+            elif op == "clustering_scan" and isinstance(summary, dict):
+                sections.append(
+                    f"K-Means clustering (k={summary.get('n_clusters')}) on features: "
+                    f"{', '.join('**' + str(f) + '**' for f in (summary.get('features') or [])[:5])}."
+                )
+
+            elif op in {"smart_viz_scan", "correlation_heatmap", "distribution_chart"} and isinstance(summary, dict):
+                n = summary.get("charts_generated") or summary.get("columns") or summary.get("column")
+                sections.append(f"Generated interactive chart(s) — see chart artifacts below. ({n})")
 
         if not sections:
             sections.append("I've analyzed your data. Check the artifacts below for detailed results.")
@@ -1276,6 +1893,7 @@ Guidelines:
 )
 async def chat(
     request: ChatRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db_session),
     user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS)),
 ):
@@ -1295,7 +1913,8 @@ async def chat(
         message=request.message,
         conversation_id=request.conversation_id,
         dataset_id=request.dataset_id,
-        context=request.context
+        context=request.context,
+        background_tasks=background_tasks,
     )
     
     return APIResponse.success(data=response)
@@ -1383,6 +2002,8 @@ async def get_conversation(
         "created_at": conversation.created_at.isoformat(),
         "updated_at": conversation.updated_at.isoformat(),
         "active_dataset_id": str(conversation.active_dataset_id) if conversation.active_dataset_id else None,
+        "worksheets": ((conversation.context or {}).get("pending_clarification") or {}).get("worksheets") or
+                      ((conversation.context or {}).get("analysis_scope") or {}).get("worksheets"),
         "messages": [
             {
                 "id": str(m.id),

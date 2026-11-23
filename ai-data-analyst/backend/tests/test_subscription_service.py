@@ -55,3 +55,84 @@ async def test_self_host_skips_enforcement(db_session):
         assert gate["allowed"] is True
     finally:
         settings.deployment_mode = old_mode
+
+
+@pytest.mark.asyncio
+async def test_hosted_free_upload_size_and_monthly_count(sub_session):
+    from app.models import User
+    from app.services.auth_service import PasswordHasher
+
+    user = User(
+        id=uuid4(),
+        email=f"uploads-{uuid4().hex[:8]}@example.com",
+        hashed_password=PasswordHasher.hash("Str0ngPassw0rd!"),
+        full_name="Upload User",
+        is_active=True,
+        settings={},
+    )
+    sub_session.add(user)
+    await sub_session.commit()
+    svc = SubscriptionService(sub_session)
+
+    with pytest.raises(QuotaExceededError):
+        await svc.assert_can_upload(user.id, file_size_bytes=11 * 1024 * 1024)
+
+    for _ in range(3):
+        await svc.assert_can_upload(user.id, file_size_bytes=1024)
+        await svc.record_upload(user.id)
+
+    with pytest.raises(QuotaExceededError):
+        await svc.assert_can_upload(user.id, file_size_bytes=1024)
+    assert (await svc.get_status(user.id))["usage"]["monthly_uploads"] == 3
+
+
+@pytest.mark.asyncio
+async def test_hosted_pro_upload_respects_file_size_limit(sub_session):
+    from app.models import User
+    from app.services.auth_service import PasswordHasher
+
+    user = User(
+        id=uuid4(),
+        email=f"pro-upload-{uuid4().hex[:8]}@example.com",
+        hashed_password=PasswordHasher.hash("Str0ngPassw0rd!"),
+        full_name="Pro Upload User",
+        is_active=True,
+        settings={"subscription": {"plan": "pro", "status": "active"}},
+    )
+    sub_session.add(user)
+    await sub_session.commit()
+    svc = SubscriptionService(sub_session)
+
+    await svc.assert_can_upload(user.id, file_size_bytes=11 * 1024 * 1024)
+    with pytest.raises(QuotaExceededError):
+        await svc.assert_can_upload(user.id, file_size_bytes=1025 * 1024 * 1024)
+
+
+@pytest.mark.asyncio
+async def test_beta_compute_is_metered_and_training_is_blocked(sub_session):
+    from app.models import User
+    from app.services.auth_service import PasswordHasher
+
+    user = User(
+        id=uuid4(),
+        email=f"beta-{uuid4().hex[:8]}@example.com",
+        hashed_password=PasswordHasher.hash("Str0ngPassw0rd!"),
+        full_name="Beta User",
+        is_active=True,
+        settings={},
+    )
+    sub_session.add(user)
+    await sub_session.commit()
+    svc = SubscriptionService(sub_session)
+    await svc.set_plan(user.id, plan="beta")
+
+    with pytest.raises(QuotaExceededError):
+        await svc.assert_can_run(user.id, action=UsageAction.ML_TRAIN)
+
+    for _ in range(10):
+        await svc.assert_can_run(user.id, action=UsageAction.COMPUTE_SESSION)
+        await svc.record_usage(user.id, action=UsageAction.COMPUTE_SESSION)
+
+    with pytest.raises(QuotaExceededError):
+        await svc.assert_can_run(user.id, action=UsageAction.COMPUTE_SESSION)
+    assert (await svc.get_status(user.id))["usage"]["compute_sessions_used"] == 10

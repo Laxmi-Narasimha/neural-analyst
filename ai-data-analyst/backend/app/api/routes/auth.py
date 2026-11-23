@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import secrets
 from typing import Any, Optional
 from datetime import datetime
 from uuid import UUID, uuid5, NAMESPACE_DNS
@@ -42,6 +43,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(..., min_length=8)
     full_name: Optional[str] = None
     role: Optional[str] = "analyst"
+    invite_code: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -227,7 +229,15 @@ async def register(
 ):
     """Register a new user."""
     try:
-        role = UserRole(request.role) if request.role else UserRole.ANALYST
+        configured_invite = get_settings().registration_invite_code
+        if configured_invite and not secrets.compare_digest(
+            request.invite_code or "", configured_invite.get_secret_value()
+        ):
+            raise HTTPException(status_code=403, detail="A valid invitation is required")
+        # Public registration must never assign privileged roles from user input.
+        if request.role and request.role.lower() != UserRole.ANALYST.value:
+            raise HTTPException(status_code=400, detail="Public registration only supports analyst accounts")
+        role = UserRole.ANALYST
 
         result = await auth_service.register_user(
             db=db,
@@ -236,6 +246,13 @@ async def register(
             role=role,
             full_name=request.full_name,
         )
+
+        if configured_invite and get_settings().deployment_mode.value == "saas":
+            from app.services.subscription_service import SubscriptionService, SubscriptionPlan
+
+            await SubscriptionService(db).set_plan(
+                UUID(result["user_id"]), plan=SubscriptionPlan.BETA.value
+            )
 
         return {
             "status": "success",

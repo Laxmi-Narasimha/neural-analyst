@@ -84,6 +84,7 @@ class JobType(str, Enum):
     DATASET_TRANSFORM = "dataset_transform"
     COMPUTE_PLAN = "compute_plan"
     DATASET_PURGE = "dataset_purge"
+    ML_TRAINING = "ml_training"
 
 
 class JobStatus(str, Enum):

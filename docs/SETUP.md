@@ -171,3 +171,37 @@ docker compose -f docker-compose.yml -f docker-compose.celery.yml -f docker-comp
 MinIO endpoints:
 - S3 endpoint: `http://localhost:9000`
 - Console UI: `http://localhost:9001` (login: `minioadmin` / `minioadmin`)
+
+## Self-host architecture (BYOK + your compute)
+
+Neural Analyst is designed for **self-host first**:
+
+| Layer | Where it runs | What you provide |
+|-------|---------------|------------------|
+| Web UI | Your browser → your Docker/local frontend | Nothing extra |
+| API + compute | Your container or `uvicorn` process | RAM/CPU on your machine or cloud VM |
+| LLM chat | LiteLLM → your provider | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or free local **Ollama** |
+| ML / AutoML | sklearn in-process or Celery worker | Same machine RAM (scales via reservoir sampling) |
+| Large files | DuckDB pushdown on CSV/Parquet | Disk only — no full pandas load |
+
+**Web UI vs CLI:** Use the web UI for upload, chat, and artifacts. Docker (`scripts/self_host.ps1`) is the easiest one-command setup. CLI is only needed for power users running `uvicorn`/`celery` directly.
+
+Open **http://localhost:3000/setup-keys** after starting for BYOK checklist and live deployment status (`GET /api/v1/system/info`).
+
+## Test datasets (download and try)
+
+| Dataset | Size | Good for | Download |
+|---------|------|----------|----------|
+| Titanic | ~900 rows | Classification, missingness, ML baseline | [Kaggle Titanic](https://www.kaggle.com/c/titanic/data) |
+| House Prices | ~1.5k rows | Regression, feature importance | [Kaggle House Prices](https://www.kaggle.com/c/house-prices-advanced-regression-techniques/data) |
+| Iris | 150 rows | Quick smoke test | [UCI Iris](https://archive.ics.uci.edu/ml/datasets/iris) |
+| Wine Quality | ~6.5k rows | Regression, correlations | [UCI Wine](https://archive.ics.uci.edu/ml/datasets/wine+quality) |
+| NYC TLC trips | Millions | DuckDB full-count, large-file sampling | [NYC TLC trip records](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page) |
+| US government open data | Varies | Real-world EDA | [data.gov](https://data.gov/) |
+| Dataset search | Any | Finding niche domains | [Google Dataset Search](https://datasetsearch.research.google.com/) |
+
+**Suggested first test flow:**
+1. Upload Titanic CSV → ask "show missing values" (Talk-to-Data, no LLM key needed)
+2. Ask "train a baseline model for survival" → model comparison table appears in chat
+3. Ask "analyze sentiment" on a reviews CSV, or "forecast next 8 months" on a time-series CSV
+4. For million-row Parquet: ask "exact row count without loading" → DuckDB pushdown

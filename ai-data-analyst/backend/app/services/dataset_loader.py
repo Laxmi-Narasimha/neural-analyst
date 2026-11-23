@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
@@ -35,6 +35,8 @@ class LoadedDataset:
     df: pd.DataFrame
     profile_report: dict[str, Any]
     schema_info: dict[str, Any]
+    prepared: dict = field(default_factory=dict)
+    disk_scan: bool = False
 
 
 def _sha256_fileobj(fileobj) -> str:
@@ -46,6 +48,16 @@ def _sha256_fileobj(fileobj) -> str:
         hasher.update(chunk)
     fileobj.seek(0)
     return hasher.hexdigest()
+
+
+def file_version(record):
+    version = (record.profile_report or {}).get("file_hash")
+    if version:
+        return str(version)
+    path = get_object_store().ensure_local_path(record.file_path, expected_size_bytes=record.file_size_bytes,
+                                                filename_hint=record.original_filename)
+    with Path(path).open("rb") as source:
+        return _sha256_fileobj(source)
 
 
 class DatasetLoaderService:
@@ -142,28 +154,38 @@ class DatasetLoaderService:
         except Exception:
             version_hint = ""
 
+        total_rows_hint = getattr(dataset, "row_count", None)
+        try:
+            pr_rows = (dataset.profile_report or {}).get("row_count") if isinstance(dataset.profile_report, dict) else None
+            if pr_rows is not None:
+                total_rows_hint = int(pr_rows)
+        except Exception:
+            pass
+
         def _load_sync() -> tuple[pd.DataFrame, str]:
             with local_path.open("rb") as f:
-                # Avoid re-hashing large files on every load. Prefer the persisted version_hash
-                # from dataset processing when available.
                 version_hash = version_hint or _sha256_fileobj(f)
+
+            if sample_rows is not None:
+                from app.services.ml_dataset_sampler import load_representative_sample
+
+                ff_str = str(dataset.file_format or "")
+                df, _sampling_meta = load_representative_sample(
+                    local_path,
+                    filename=str(dataset.original_filename or "dataset"),
+                    file_format=ff_str,
+                    sample_rows=int(sample_rows),
+                    total_rows=int(total_rows_hint) if total_rows_hint is not None else None,
+                )
+                return df, version_hash
+
+            with local_path.open("rb") as f:
                 ff: FileFormat | None
                 try:
                     ff = FileFormat(str(dataset.file_format or "").lower())
                 except Exception:
                     ff = None
-                parse_opts: dict[str, Any] = {}
-                if sample_rows is not None:
-                    # Best-effort sampling at read time for formats that support it.
-                    parse_opts["nrows"] = int(sample_rows)
-                try:
-                    df = self._ingestion.parse_file(f, dataset.original_filename, file_format=ff, **parse_opts)
-                except TypeError:
-                    # Some parsers (e.g., parquet) don't support nrows; fall back to slicing after load.
-                    f.seek(0)
-                    df = self._ingestion.parse_file(f, dataset.original_filename, file_format=ff)
-                    if sample_rows is not None:
-                        df = df.head(int(sample_rows))
+                df = self._ingestion.parse_file(f, dataset.original_filename, file_format=ff)
                 return df, version_hash
 
         try:

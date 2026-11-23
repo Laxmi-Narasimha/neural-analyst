@@ -5,10 +5,16 @@ from uuid import UUID
 
 from fastapi import BackgroundTasks
 
-from app.core.config import JobExecutor, settings
+from app.core.config import DeploymentMode, JobExecutor, settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def _handle_enqueue_failure(kind: str, error: Exception) -> None:
+    if settings.deployment_mode == DeploymentMode.SAAS:
+        raise RuntimeError(f"{kind} queue unavailable; hosted jobs cannot run in the API process") from error
+    logger.warning(f"Celery {kind} enqueue failed; falling back to local background task: {error}")
 
 
 def enqueue_dataset_processing(
@@ -31,7 +37,7 @@ def enqueue_dataset_processing(
             process_dataset_task.delay(str(dataset_id), str(job_id) if job_id else None)
             return {"executor": "celery"}
         except Exception as e:
-            logger.warning(f"Celery enqueue failed; falling back to local background task: {e}")
+            _handle_enqueue_failure("dataset", e)
 
     from app.services.dataset_processing import DatasetProcessingService
 
@@ -59,7 +65,7 @@ def enqueue_compute_plan(
             run_analysis_task.delay(str(analysis_id), str(job_id) if job_id else None)
             return {"executor": "celery"}
         except Exception as e:
-            logger.warning(f"Celery enqueue failed; falling back to local background task: {e}")
+            _handle_enqueue_failure("analysis", e)
 
     from app.services.analysis_execution import AnalysisExecutionService
 
@@ -87,7 +93,7 @@ def enqueue_dataset_transform(
             transform_dataset_task.delay(str(dataset_id), str(job_id) if job_id else None)
             return {"executor": "celery"}
         except Exception as e:
-            logger.warning(f"Celery enqueue failed; falling back to local background task: {e}")
+            _handle_enqueue_failure("transform", e)
 
     from app.services.dataset_transform import DatasetTransformService
 
@@ -115,9 +121,68 @@ def enqueue_dataset_purge(
             purge_dataset_task.delay(str(dataset_id), str(job_id) if job_id else None)
             return {"executor": "celery"}
         except Exception as e:
-            logger.warning(f"Celery enqueue failed; falling back to local background task: {e}")
+            _handle_enqueue_failure("purge", e)
 
     from app.services.dataset_purge import DatasetPurgeService
 
     background_tasks.add_task(DatasetPurgeService().purge_dataset, dataset_id, job_id)
+    return {"executor": "local"}
+
+
+def enqueue_ml_training(
+    *,
+    background_tasks: BackgroundTasks,
+    job_id: UUID,
+    owner_id: UUID,
+    dataset_id: UUID,
+    target_column: str,
+    task: Optional[str] = None,
+    sample_rows: Optional[int] = None,
+    max_models: Optional[int] = None,
+    optimize: bool = True,
+) -> dict[str, Any]:
+    """
+    Enqueue AutoML / full ML training on a representative sample.
+
+    - LOCAL: FastAPI BackgroundTasks
+    - CELERY: Celery distributed workers
+    """
+    payload = {
+        "job_id": str(job_id),
+        "owner_id": str(owner_id),
+        "dataset_id": str(dataset_id),
+        "target_column": target_column,
+        "task": task,
+        "sample_rows": sample_rows,
+        "max_models": max_models,
+        "optimize": optimize,
+    }
+
+    if settings.job_executor == JobExecutor.CELERY:
+        try:
+            from app.workers.celery_app import run_ml_training_task
+
+            run_ml_training_task.delay(payload)
+            return {"executor": "celery"}
+        except Exception as e:
+            _handle_enqueue_failure("ML", e)
+
+    from app.services.ml_training_service import MLTrainingService
+    from app.services.database import db_manager
+
+    async def _run() -> None:
+        async with db_manager.session() as session:
+            service = MLTrainingService(session)
+            await service.run_automl_job(
+                job_id=job_id,
+                owner_id=owner_id,
+                dataset_id=dataset_id,
+                target_column=target_column,
+                task=task,
+                sample_rows=sample_rows,
+                max_models=max_models,
+                optimize=optimize,
+            )
+
+    background_tasks.add_task(lambda: __import__("asyncio").run(_run()))
     return {"executor": "local"}
