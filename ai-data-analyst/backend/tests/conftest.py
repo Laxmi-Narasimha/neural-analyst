@@ -14,6 +14,10 @@ import pytest_asyncio
 # Add parent to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
+# Never let the suite reach a real language model by accident (a local .env may
+# configure one). Planner tests enable it explicitly with a scripted fake model.
+os.environ.setdefault("LLM_PLANNER", "off")
+
 
 # =============================================================================
 # Synthetic Data Generator Fixtures

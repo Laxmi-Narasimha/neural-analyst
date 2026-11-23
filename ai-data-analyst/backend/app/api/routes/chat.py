@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -506,6 +507,7 @@ class ChatService:
             conditions = []
             matched_rows = None
             disk = None
+            planner_note: str | None = None
             try:
                 if not effective_message.strip() and sheets:
                     edit = ScopeEdit("", [], [])
@@ -522,11 +524,16 @@ class ChatService:
                         plan = last.get("steps") or [{"operator": "dataset_overview", "params": {}}]
                         if edit.clear and any(s["operator"].startswith("ml_") for s in plan):
                             plan = [{"operator": "dataset_overview", "params": {}}]
+                if not plan and edit.question:
+                    plan, planner_note = await self._plan_with_llm(edit.question, schema, last)
                 if not plan:
                     raise ScopeQuestion("I couldn't match the complete question to a supported calculation. Specify the measurement or comparison and its conditions.")
                 if sheets and sheets != last.get("worksheets") and last:
                     check_carried_columns(schema, last, plan, edit)
-                verify_measurement(edit.question, schema, plan)
+                if planner_note is None:
+                    # Rule plans bind keywords, so residual qualifiers must be refused here.
+                    # LLM plans report unbound restrictions themselves (see app/planning).
+                    verify_measurement(edit.question, schema, plan)
                 if edit.retail_group:
                     if len(plan) != 1 or plan[0]["operator"] != "measure_aggregate":
                         raise ScopeQuestion("Name a numeric measure, for example ‘sum Sales by retail period using Posted’.")
@@ -722,6 +729,9 @@ class ChatService:
                     content += "\n\nThe evidence table is limited to 1,000 groups."
             if not disk and not conditions and dataset_record.row_count is not None and len(loaded.df) < dataset_record.row_count:
                 content += f"\n\nCompute input: {len(loaded.df):,} sampled rows out of {dataset_record.row_count:,}."
+            if planner_note:
+                scope["planned_by"] = "llm"
+                content = planner_note + "\n\n" + content
             if sheets:
                 scope.update(worksheets=sheets, worksheet_column=schema["worksheet_column"],
                              column_types={c["name"]: type_family(c["inferred_type"]) for c in schema["columns"]})
@@ -1223,6 +1233,41 @@ class ChatService:
                 if str(col.get("name") or "").lower() == candidate.lower():
                     return str(col.get("name"))
         return None
+
+    async def _plan_with_llm(
+        self, question: str, schema: dict[str, Any], last: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """Plan a question the rule planner could not bind, via the validated LLM planner.
+
+        Returns (steps, note shown above the answer). Raises ScopeQuestion when the
+        model asks for clarification or says the question is out of reach.
+        """
+        from app.planning.llm_planner import plan_question
+
+        outcome = await plan_question(
+            question,
+            schema,
+            llm=self.llm,
+            model=os.getenv("LLM_PLANNER_MODEL") or None,
+            context={"previous_steps": (last or {}).get("steps") or []},
+        )
+        if outcome.status == "plan":
+            ops = ", ".join(step["operator"] for step in outcome.steps)
+            note = f"Interpreted your question as: {outcome.reason or ops}" if outcome.reason else f"Plan: {ops}"
+            if outcome.notes:
+                note += " " + " ".join(outcome.notes)
+            return outcome.steps, note
+        if outcome.status == "clarify":
+            text = outcome.question
+            if outcome.options:
+                text += " Options: " + ", ".join(outcome.options) + "."
+            raise ScopeQuestion(text)
+        if outcome.status == "unsupported":
+            raise ScopeQuestion(
+                "This question is outside what I can calculate reliably on this dataset"
+                + (f": {outcome.reason}" if outcome.reason else ".")
+            )
+        return [], None
 
     def _select_plan(self, user_message: str, *, dataset_record: Any | None = None) -> list[dict[str, Any]]:
         msg_raw = user_message or ""
