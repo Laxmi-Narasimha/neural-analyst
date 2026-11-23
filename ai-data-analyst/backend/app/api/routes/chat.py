@@ -1661,22 +1661,65 @@ class ChatService:
                 metrics = summary.get("test_metrics") if isinstance(summary, dict) else {}
                 cv_mean = summary.get("cv_mean") if isinstance(summary, dict) else None
                 registered = summary.get("registered_model") if isinstance(summary, dict) else None
+                summary = summary if isinstance(summary, dict) else {}
+                best_display = summary.get("best_model_display") or best
+                scoring = summary.get("cv_scoring") or "score"
                 lines = [
                     f"I trained and compared models to predict **{target}** ({task}).",
-                    f"**Best model:** {best}",
+                    f"**Best model:** {best_display}",
                 ]
+                split = summary.get("split") if isinstance(summary.get("split"), dict) else {}
+                if split.get("strategy") == "time_ordered":
+                    test_period = split.get("test_period") or ["?", "?"]
+                    lines.append(
+                        f"**Evaluation:** trained on earlier rows, tested on the {int(split.get('test_rows') or 0):,} "
+                        f"most recent by **{split.get('time_column')}** ({test_period[0]} to {test_period[1]})."
+                    )
+                elif split:
+                    lines.append(
+                        f"**Evaluation:** {int(split.get('test_rows') or 0):,} randomly held-out rows "
+                        "never seen during training or model selection."
+                    )
                 if cv_mean is not None:
-                    lines.append(f"**Cross-validation score:** {float(cv_mean):.4f}")
+                    lines.append(f"**Cross-validation {scoring}:** {float(cv_mean):.4f}")
+                else:
+                    lines.append("**Cross-validation:** could not be computed, so this model is unvalidated.")
+                baseline = summary.get("baseline") if isinstance(summary.get("baseline"), dict) else {}
+                if baseline.get("cv_mean") is not None:
+                    verdict = summary.get("beats_baseline")
+                    verdict_text = (
+                        "beats it" if verdict else "does **not** meaningfully beat it" if verdict is False else "compared"
+                    )
+                    lines.append(
+                        f"**Naive baseline {scoring}:** {float(baseline['cv_mean']):.4f}; the best model {verdict_text}."
+                    )
                 if isinstance(metrics, dict) and metrics:
-                    metric_bits = [f"{k}={float(v):.4f}" for k, v in list(metrics.items())[:4]]
-                    lines.append(f"**Test metrics:** {', '.join(metric_bits)}")
+                    metric_bits = [
+                        f"{k}={float(v):.4f}" for k, v in list(metrics.items())[:4] if v is not None
+                    ]
+                    lines.append(f"**Held-out metrics:** {', '.join(metric_bits)}")
+                leaky = summary.get("excluded_leaky_columns") or []
+                if leaky:
+                    lines.append(
+                        "**Excluded because they give away the answer:** "
+                        + ", ".join(f"{i.get('column')} ({i.get('reason')})" for i in leaky if isinstance(i, dict))
+                    )
                 if registered:
-                    lines.append(f"Model registered as **{registered}** (ready for predictions).")
-                importance = summary.get("feature_importance") if isinstance(summary, dict) else {}
+                    lines.append(
+                        f"Model registered as **{registered}** v{summary.get('registered_version')} "
+                        "with its preprocessing, ready to score new rows."
+                    )
+                importance = summary.get("feature_importance") or {}
                 if isinstance(importance, dict) and importance:
-                    top_feats = list(importance.items())[:5]
+                    top_feats = [(k, v) for k, v in importance.items() if v is not None][:5]
                     feat_lines = [f"  • **{k}**: {float(v):.4f}" for k, v in top_feats]
-                    lines.append("**Top features:**\n" + "\n".join(feat_lines))
+                    lines.append(
+                        f"**Most influential columns** (drop in {scoring} when shuffled on held-out rows):\n"
+                        + "\n".join(feat_lines)
+                    )
+                for w in (summary.get("warnings") or [])[:4]:
+                    if not str(w).startswith("Excluded columns that give away"):
+                        lines.append(f"⚠️ {w}")
                 sampled = summary.get("sample_rows")
                 if sampled:
                     lines.append(f"Trained on **{int(sampled):,}** representative rows from your dataset.")

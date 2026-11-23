@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional, Callable
 from uuid import uuid4
 import json
+import os
 import pickle
 import hashlib
 
@@ -23,6 +24,42 @@ except ImportError:
     class ValidationException(Exception): pass
 
 logger = get_logger(__name__)
+
+_REGISTRY_FORMAT = 2
+
+
+def _round_metric(value: Any) -> Any:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return value
+    return round(f, 4) if np.isfinite(f) else None
+
+
+def _jsonable(value: Any) -> Any:
+    """Make params/metrics safe for registry.json (numpy scalars, NaN, nested)."""
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _parse_dt(value: Any) -> datetime:
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+    return datetime.utcnow()
 
 
 # ============================================================================
@@ -79,9 +116,41 @@ class ModelVersion:
             "created_at": self.created_at.isoformat(),
             "created_by": self.created_by,
             "description": self.description,
-            "metrics": {k: round(v, 4) for k, v in self.metrics.items()},
+            "metrics": {k: _round_metric(v) for k, v in self.metrics.items()},
             "params": self.params
         }
+
+    def to_storage_dict(self) -> dict[str, Any]:
+        data = self.to_dict()
+        data["metrics"] = {k: _jsonable(v) for k, v in self.metrics.items()}
+        data["params"] = _jsonable(self.params)
+        data.update(
+            {
+                "model_path": self.model_path,
+                "artifact_paths": list(self.artifact_paths),
+                "parent_version": self.parent_version,
+                "training_data_hash": self.training_data_hash,
+            }
+        )
+        return data
+
+    @classmethod
+    def from_storage_dict(cls, data: dict[str, Any]) -> "ModelVersion":
+        return cls(
+            version=int(data["version"]),
+            model_id=str(data.get("model_id", "")),
+            stage=ModelStage(data.get("stage", ModelStage.DEVELOPMENT.value)),
+            status=ModelStatus(data.get("status", ModelStatus.ACTIVE.value)),
+            created_at=_parse_dt(data.get("created_at")),
+            created_by=str(data.get("created_by", "system")),
+            description=str(data.get("description", "")),
+            metrics=dict(data.get("metrics") or {}),
+            params=dict(data.get("params") or {}),
+            model_path=data.get("model_path"),
+            artifact_paths=list(data.get("artifact_paths") or []),
+            parent_version=data.get("parent_version"),
+            training_data_hash=data.get("training_data_hash"),
+        )
 
 
 @dataclass
@@ -113,6 +182,26 @@ class RegisteredModel:
             "production_version": self.production_version,
             "latest_version": self.versions[-1].version if self.versions else None
         }
+
+    def to_storage_dict(self) -> dict[str, Any]:
+        data = self.to_dict()
+        data["versions"] = [v.to_storage_dict() for v in self.versions]
+        return data
+
+    @classmethod
+    def from_storage_dict(cls, data: dict[str, Any]) -> "RegisteredModel":
+        versions = [ModelVersion.from_storage_dict(v) for v in data.get("versions") or []]
+        versions.sort(key=lambda v: v.version)
+        return cls(
+            model_id=str(data["model_id"]),
+            name=str(data["name"]),
+            description=str(data.get("description", "")),
+            created_at=_parse_dt(data.get("created_at")),
+            updated_at=_parse_dt(data.get("updated_at")),
+            tags=dict(data.get("tags") or {}),
+            versions=versions,
+            production_version=data.get("production_version"),
+        )
 
 
 @dataclass
@@ -149,43 +238,97 @@ class ModelRegistry:
     - Model serving
     """
     
-    def __init__(self, storage_path: str = "./model_registry"):
+    def __init__(self, storage_path: str | Path = "./model_registry"):
         self._storage_path = Path(storage_path)
         self._storage_path.mkdir(parents=True, exist_ok=True)
-        
+
         self._models: dict[str, RegisteredModel] = {}
         self._experiments: dict[str, Experiment] = {}
-        
+
         self._load_registry()
-    
+
+    @property
+    def storage_path(self) -> Path:
+        return self._storage_path
+
+    def _resolve_artifact(self, model_path: Optional[str]) -> Optional[Path]:
+        if not model_path:
+            return None
+        p = Path(model_path)
+        if p.is_absolute():
+            return p
+        # Stored relative to the registry folder; older entries were relative to the cwd.
+        candidate = self._storage_path / p
+        return candidate if candidate.exists() or not p.exists() else p
+
+    def _recover_versions_from_disk(self, model: RegisteredModel) -> None:
+        """Rebuild versions for entries written before versions were persisted."""
+        model_dir = self._storage_path / model.name
+        if not model_dir.is_dir():
+            return
+        for vdir in sorted(model_dir.glob("v*"), key=lambda d: d.name):
+            artifact = vdir / "model.pkl"
+            suffix = vdir.name[1:]
+            if not artifact.exists() or not suffix.isdigit():
+                continue
+            model.versions.append(
+                ModelVersion(
+                    version=int(suffix),
+                    model_id=model.model_id,
+                    stage=ModelStage.DEVELOPMENT,
+                    status=ModelStatus.ACTIVE,
+                    created_at=datetime.utcfromtimestamp(artifact.stat().st_mtime),
+                    description="recovered from registry folder",
+                    model_path=str(artifact.relative_to(self._storage_path)),
+                )
+            )
+        model.versions.sort(key=lambda v: v.version)
+
     def _load_registry(self) -> None:
-        """Load registry from disk."""
+        """Load registry from disk, including every saved version."""
         registry_file = self._storage_path / "registry.json"
-        if registry_file.exists():
+        if not registry_file.exists():
+            return
+        try:
+            with open(registry_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            logger.warning(f"Could not read model registry {registry_file}: {e}")
+            return
+        for model_data in data.get("models", []):
             try:
-                with open(registry_file, 'r') as f:
-                    data = json.load(f)
-                    # Reconstruct models
-                    for model_data in data.get("models", []):
-                        model = RegisteredModel(
-                            model_id=model_data["model_id"],
-                            name=model_data["name"],
-                            description=model_data.get("description", ""),
-                            tags=model_data.get("tags", {})
-                        )
-                        self._models[model.name] = model
+                model = RegisteredModel.from_storage_dict(model_data)
             except Exception as e:
-                logger.warning(f"Could not load registry: {e}")
-    
+                logger.warning(f"Skipping unreadable registry entry {model_data.get('name')!r}: {e}")
+                continue
+            if not model.versions:
+                self._recover_versions_from_disk(model)
+            self._models[model.name] = model
+        for exp_data in data.get("experiments", []):
+            try:
+                self._experiments[exp_data["name"]] = Experiment(
+                    experiment_id=str(exp_data["experiment_id"]),
+                    name=str(exp_data["name"]),
+                    created_at=_parse_dt(exp_data.get("created_at")),
+                    runs=list(exp_data.get("runs") or []),
+                )
+            except Exception:
+                continue
+
     def _save_registry(self) -> None:
-        """Save registry to disk."""
+        """Write registry.json atomically so a crash never leaves it half-written."""
         registry_file = self._storage_path / "registry.json"
         data = {
-            "models": [m.to_dict() for m in self._models.values()],
-            "experiments": [e.to_dict() for e in self._experiments.values()]
+            "format": _REGISTRY_FORMAT,
+            "models": [m.to_storage_dict() for m in self._models.values()],
+            "experiments": [
+                {**e.to_dict(), "runs": _jsonable(e.runs)} for e in self._experiments.values()
+            ],
         }
-        with open(registry_file, 'w') as f:
+        tmp = registry_file.with_suffix(f".json.{uuid4().hex}.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp, registry_file)
     
     def register_model(
         self,
@@ -207,16 +350,17 @@ class ModelRegistry:
             )
         
         registered = self._models[name]
-        version_num = len(registered.versions) + 1
-        
+        version_num = max((v.version for v in registered.versions), default=0) + 1
+
         # Save model artifact
         model_path = self._storage_path / name / f"v{version_num}"
         model_path.mkdir(parents=True, exist_ok=True)
         model_file = model_path / "model.pkl"
-        
+
+        payload = pickle.dumps(model)
         with open(model_file, 'wb') as f:
-            pickle.dump(model, f)
-        
+            f.write(payload)
+
         # Create version
         version = ModelVersion(
             version=version_num,
@@ -225,8 +369,9 @@ class ModelRegistry:
             status=ModelStatus.ACTIVE,
             metrics=metrics or {},
             params=params or {},
-            model_path=str(model_file),
-            description=description
+            model_path=str(model_file.relative_to(self._storage_path)),
+            description=description,
+            training_data_hash=(tags or {}).get("dataset_version") or None,
         )
         
         registered.versions.append(version)
@@ -286,9 +431,9 @@ class ModelRegistry:
         # Find version
         version_obj = None
         
-        if version:
+        if version is not None:
             for v in registered.versions:
-                if v.version == version:
+                if v.version == int(version):
                     version_obj = v
                     break
         elif stage:
@@ -301,12 +446,18 @@ class ModelRegistry:
             version_obj = registered.versions[-1] if registered.versions else None
         
         if version_obj is None:
-            raise ValidationException("No matching model version found")
-        
-        if version_obj.model_path is None:
-            raise ValidationException("Model artifact not found")
-        
-        with open(version_obj.model_path, 'rb') as f:
+            available = ", ".join(str(v.version) for v in registered.versions) or "none"
+            wanted = f"version {version}" if version is not None else (f"stage {stage.value}" if stage else "latest")
+            raise ValidationException(
+                f"No {wanted} found for model {name}; available versions: {available}"
+            )
+
+        artifact = self._resolve_artifact(version_obj.model_path)
+        if artifact is None or not artifact.exists():
+            raise ValidationException(f"Model artifact for {name} v{version_obj.version} is missing")
+
+        # Artifacts are written only by this service into its own folder.
+        with open(artifact, 'rb') as f:
             return pickle.load(f)
     
     def get_production_model(self, name: str) -> Any:
@@ -417,6 +568,6 @@ class ModelRegistry:
 
 
 # Factory function
-def get_model_registry(path: str = "./model_registry") -> ModelRegistry:
-    """Get model registry instance."""
-    return ModelRegistry(path)
+def get_model_registry(path: Optional[str] = None) -> ModelRegistry:
+    """Get model registry instance (MODEL_REGISTRY_PATH overrides the default folder)."""
+    return ModelRegistry(path or os.getenv("MODEL_REGISTRY_PATH") or "./model_registry")

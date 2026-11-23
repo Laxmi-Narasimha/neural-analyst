@@ -38,6 +38,14 @@ class TrainModelRequest(BaseModel):
     sample_rows: Optional[int] = None
     max_models: Optional[int] = None
     mode: str = Field(default="baseline", description="baseline (sync) or automl (async job)")
+    time_column: Optional[str] = Field(
+        default=None,
+        description="Column that orders rows for evaluation; the latest rows become the test split",
+    )
+    split: Optional[str] = Field(
+        default=None,
+        description="auto (default: time-ordered when a date column exists) or random",
+    )
 
 
 class TrainModelResponse(BaseModel):
@@ -56,6 +64,10 @@ class PredictRequest(BaseModel):
 class PredictResponse(BaseModel):
     predictions: list[Any]
     probabilities: Optional[list[list[float]]] = None
+    classes: Optional[list[Any]] = None
+    model_name: Optional[str] = None
+    model_version: Optional[int] = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AutoMLRequest(BaseModel):
@@ -180,6 +192,8 @@ async def train_model(
         optimize=request.optimize,
         max_models=request.max_models,
         sample_rows=request.sample_rows,
+        time_column=request.time_column,
+        split=request.split,
     )
     return TrainModelResponse(
         status="completed",
@@ -254,14 +268,36 @@ async def predict(
         import pandas as pd
         from app.ml.model_registry import get_model_registry
 
+        from app.ml.model_registry import _jsonable
+        from app.ml.tabular_pipeline import ModelBundle
+
+        if not request.data:
+            raise ValueError("Provide at least one row in 'data'")
         registry = get_model_registry()
         model = registry.load_model(request.model_name, version=request.model_version)
         df = pd.DataFrame(request.data)
+        if isinstance(model, ModelBundle):
+            warnings = model.check_input(df)
+            return PredictResponse(
+                predictions=_jsonable(model.predict(df)),
+                probabilities=model.predict_proba(df),
+                classes=_jsonable(model.classes) if model.classes is not None else None,
+                model_name=request.model_name,
+                model_version=request.model_version,
+                warnings=warnings,
+            )
+        # Models saved before pipelines were bundled expect pre-encoded features.
         predictions = model.predict(df).tolist()
         probabilities = None
         if hasattr(model, "predict_proba"):
             probabilities = model.predict_proba(df).tolist()
-        return PredictResponse(predictions=predictions, probabilities=probabilities)
+        return PredictResponse(
+            predictions=predictions,
+            probabilities=probabilities,
+            model_name=request.model_name,
+            model_version=request.model_version,
+            warnings=["This model was saved without its preprocessing; retrain it to score raw rows."],
+        )
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -281,8 +317,21 @@ async def explain_model(
         from app.ml.explainability import get_explainability_engine
         from app.ml.model_registry import get_model_registry
 
+        from app.ml.tabular_pipeline import ModelBundle
+
         registry = get_model_registry()
         model = registry.load_model(request.model_name)
+        if isinstance(model, ModelBundle):
+            # Per-row SHAP over the full preprocessing pipeline is not implemented yet;
+            # return the held-out permutation importance recorded at training time.
+            return {
+                "method": "permutation_importance",
+                "explanation": {
+                    "feature_importance": (model.training_info or {}).get("model_feature_importance")
+                    or {},
+                    "note": "Global importance measured on held-out rows during training.",
+                },
+            }
         df = pd.DataFrame(request.data)
         explainer = get_explainability_engine()
 

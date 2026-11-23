@@ -70,6 +70,8 @@ try:
     from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
     from sklearn.neural_network import MLPClassifier, MLPRegressor
     from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.dummy import DummyClassifier, DummyRegressor
+    from sklearn.inspection import permutation_importance
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
@@ -110,15 +112,7 @@ except ImportError:
     class DataProcessingException(Exception):
         pass
 
-# Import universal data handler
-from app.ml.universal_data_handler import (
-    UniversalDataPreprocessor, IntelligentTypeDetector,
-    SemanticType, ColumnMetadata, PreprocessingResult,
-    preprocess_for_ml, analyze_dataset
-)
-
 logger = get_logger(__name__)
-warnings.filterwarnings('ignore')
 
 
 # ============================================================================
@@ -197,10 +191,12 @@ class ModelLibrary:
     def get_for_task(cls, task: MLTask, max_count: int = 10) -> List[str]:
         """Get models suitable for a task."""
         # Map task to compatible tasks
+        # Classifier configs are registered under BINARY_CLASSIFICATION but every
+        # one of them also handles more than two classes.
+        classifiers = [MLTask.BINARY_CLASSIFICATION, MLTask.MULTICLASS_CLASSIFICATION]
         task_map = {
-            MLTask.BINARY_CLASSIFICATION: [MLTask.BINARY_CLASSIFICATION, 
-                                           MLTask.MULTICLASS_CLASSIFICATION],
-            MLTask.MULTICLASS_CLASSIFICATION: [MLTask.MULTICLASS_CLASSIFICATION],
+            MLTask.BINARY_CLASSIFICATION: classifiers,
+            MLTask.MULTICLASS_CLASSIFICATION: classifiers,
             MLTask.REGRESSION: [MLTask.REGRESSION],
         }
         compatible = task_map.get(task, [task])
@@ -223,11 +219,9 @@ ModelLibrary.register(ModelConfig(
     display_name="Logistic Regression",
     estimator_class=LogisticRegression,
     task=MLTask.BINARY_CLASSIFICATION,
-    default_params={"max_iter": 1000, "random_state": 42, "n_jobs": -1},
+    default_params={"max_iter": 2000, "random_state": 42},
     search_space={
         "C": {"type": "float", "low": 0.001, "high": 100, "log": True},
-        "penalty": {"type": "categorical", "choices": ["l1", "l2", "elasticnet"]},
-        "solver": {"type": "categorical", "choices": ["saga"]}
     },
     supports_probability=True,
     tags=["fast", "interpretable", "baseline"]
@@ -360,7 +354,7 @@ ModelLibrary.register(ModelConfig(
     display_name="Linear Regression",
     estimator_class=LinearRegression,
     task=MLTask.REGRESSION,
-    default_params={"n_jobs": -1},
+    default_params={},
     search_space={},
     tags=["fast", "interpretable", "baseline"]
 ))
@@ -443,52 +437,65 @@ if HAS_XGBOOST:
 # Training Results
 # ============================================================================
 
+def _round_or_none(value: Any, ndigits: int = 4) -> Optional[float]:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(f):
+        return None
+    return round(f, ndigits)
+
+
 @dataclass
 class ModelTrainingResult:
     """Comprehensive result of model training."""
-    
+
     model_id: UUID = field(default_factory=uuid4)
     model_name: str = ""
     display_name: str = ""
     task: MLTask = MLTask.BINARY_CLASSIFICATION
     status: ModelStatus = ModelStatus.COMPLETED
-    
+    is_baseline: bool = False
+
     # Data info
     n_samples_train: int = 0
     n_samples_test: int = 0
     n_features: int = 0
     feature_names: List[str] = field(default_factory=list)
     target_column: str = ""
-    
-    # Metrics
+
+    # Metrics. cv_mean/cv_std are None when cross-validation could not be computed.
     train_metrics: Dict[str, float] = field(default_factory=dict)
     test_metrics: Dict[str, float] = field(default_factory=dict)
     cv_scores: Dict[str, List[float]] = field(default_factory=dict)
-    cv_mean: float = 0.0
-    cv_std: float = 0.0
-    
-    # Feature importance
+    cv_mean: Optional[float] = None
+    cv_std: Optional[float] = None
+    cv_scoring: str = ""
+
+    # Feature importance (permutation importance on the held-out split, in
+    # terms of the original input columns)
     feature_importance: Dict[str, float] = field(default_factory=dict)
-    
+
     # Hyperparameters
     best_params: Dict[str, Any] = field(default_factory=dict)
     optimization_trials: int = 0
-    
+
     # Preprocessing info
     preprocessing_summary: Dict[str, Any] = field(default_factory=dict)
-    
+
     # Timing
     preprocessing_time_sec: float = 0.0
     training_time_sec: float = 0.0
     optimization_time_sec: float = 0.0
     total_time_sec: float = 0.0
-    
+
     # Errors/Warnings
     warnings: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
-    
+
     created_at: datetime = field(default_factory=datetime.utcnow)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for API response."""
         return {
@@ -497,6 +504,7 @@ class ModelTrainingResult:
             "display_name": self.display_name,
             "task": self.task.value,
             "status": self.status.value,
+            "is_baseline": self.is_baseline,
             "data": {
                 "train_samples": self.n_samples_train,
                 "test_samples": self.n_samples_test,
@@ -504,13 +512,14 @@ class ModelTrainingResult:
                 "target": self.target_column
             },
             "metrics": {
-                "train": {k: round(v, 4) for k, v in self.train_metrics.items()},
-                "test": {k: round(v, 4) for k, v in self.test_metrics.items()},
-                "cv_mean": round(self.cv_mean, 4),
-                "cv_std": round(self.cv_std, 4)
+                "train": {k: _round_or_none(v) for k, v in self.train_metrics.items()},
+                "test": {k: _round_or_none(v) for k, v in self.test_metrics.items()},
+                "cv_mean": _round_or_none(self.cv_mean),
+                "cv_std": _round_or_none(self.cv_std),
+                "cv_scoring": self.cv_scoring,
             },
             "feature_importance": {
-                k: round(v, 4) for k, v in 
+                k: _round_or_none(v) for k, v in
                 sorted(self.feature_importance.items(), key=lambda x: -x[1])[:20]
             },
             "best_params": self.best_params,
@@ -530,21 +539,35 @@ class ModelTrainingResult:
 # Advanced AutoML Engine
 # ============================================================================
 
+_CLASSIFICATION_TASKS = (MLTask.BINARY_CLASSIFICATION, MLTask.MULTICLASS_CLASSIFICATION)
+_BASELINE_MARGIN = 0.01
+
+
+def _python_scalar(value: Any) -> Any:
+    return value.item() if isinstance(value, np.generic) else value
+
+
 class AdvancedAutoMLEngine:
     """
-    Advanced AutoML engine with bulletproof data handling.
-    
-    Features:
-    - Handles ANY data: nulls, outliers, mixed types, any columns
-    - Automatic task detection (classification vs regression)
-    - Intelligent model selection based on data characteristics
-    - Bayesian hyperparameter optimization (Optuna)
-    - Cross-validation with appropriate strategy (stratified, time series, etc.)
-    - Feature importance and model explanations
-    - Ensemble model creation
-    - Full preprocessing transparency
+    AutoML engine whose reported scores mean what they say.
+
+    - All preprocessing (type handling, imputation, scaling, encoding, date
+      features) is the first step of a scikit-learn Pipeline, so it is refitted
+      on every training fold and never sees held-out rows.
+    - Rows with a missing target are dropped, never imputed.
+    - Columns that copy or deterministically encode the target are excluded
+      (and reported) before training.
+    - Model selection uses cross-validation on the training split only; the
+      held-out split is scored once, after selection.
+    - Every run includes a trivial baseline (DummyClassifier/DummyRegressor) and
+      reports whether the chosen model beats it.
+    - With ``time_column`` the held-out split is the latest period and
+      cross-validation uses forward-chaining folds, so no future rows are used
+      to evaluate past ones.
+    - ``build_bundle`` exports the fitted pipeline as a ModelBundle that scores
+      raw rows in a fresh process.
     """
-    
+
     def __init__(
         self,
         test_size: float = 0.2,
@@ -554,8 +577,10 @@ class AdvancedAutoMLEngine:
         optimization_trials: int = 50,
         optimization_timeout: int = 300,  # seconds per model
         scoring: Optional[str] = None,  # auto-select if None
-        n_jobs: int = -1,
-        verbose: bool = True
+        n_jobs: int = 1,
+        verbose: bool = True,
+        max_onehot_categories: int = 20,
+        exclude_leaky_columns: bool = True,
     ):
         self.test_size = test_size
         self.cv_folds = cv_folds
@@ -566,14 +591,22 @@ class AdvancedAutoMLEngine:
         self.scoring = scoring
         self.n_jobs = n_jobs
         self.verbose = verbose
-        
+        self.max_onehot_categories = max_onehot_categories
+        self.exclude_leaky_columns = exclude_leaky_columns
+
         # State
-        self._preprocessor: Optional[UniversalDataPreprocessor] = None
-        self._trained_models: Dict[str, Tuple[BaseEstimator, ModelTrainingResult]] = {}
+        self._trained_models: Dict[str, Tuple[Optional[Pipeline], ModelTrainingResult]] = {}
         self._best_model_name: Optional[str] = None
         self._task: Optional[MLTask] = None
-        self._label_encoder: Optional[LabelEncoder] = None
-    
+        self._classes: Optional[List[Any]] = None
+        self._target_column: str = ""
+        self._input_columns: List[str] = []
+        self._baseline: Optional[Tuple[Pipeline, ModelTrainingResult]] = None
+        self.training_report: Dict[str, Any] = {}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
     def auto_train(
         self,
         df: pd.DataFrame,
@@ -582,686 +615,755 @@ class AdvancedAutoMLEngine:
         models: Optional[List[str]] = None,
         exclude_columns: Optional[List[str]] = None,
         optimize: bool = True,
-        max_models: int = 5
+        max_models: int = 5,
+        time_column: Optional[str] = None,
     ) -> List[ModelTrainingResult]:
-        """
-        Automatically train models on ANY data.
-        
-        Handles:
-        - Missing values at any percentage
-        - Outliers in any column
-        - Mixed data types
-        - Any number of columns/rows
-        - Categorical and numerical features
-        - Date/time columns
-        - Text columns
-        
-        Args:
-            df: Input dataframe (any format)
-            target_column: Target column name
-            task: ML task (auto-detected if None)
-            models: List of model names (auto-selected if None)
-            exclude_columns: Columns to exclude from features
-            optimize: Whether to optimize hyperparameters
-            max_models: Maximum models to train
-        
-        Returns:
-            List of training results sorted by performance
+        """Train, cross-validate and compare models; return results best-first.
+
+        The baseline is not part of the returned list; see ``training_report``.
         """
         total_start = datetime.utcnow()
         context = LogContext(component="AdvancedAutoML", operation="auto_train")
-        
-        if self.verbose:
-            logger.info(f"Starting AutoML training on {df.shape[0]} rows, {df.shape[1]} columns", 
-                       context=context)
-        
-        # Validate input
+        run_warnings: List[str] = []
+
+        if df is None or df.empty:
+            raise MLException("Empty dataframe provided")
         if target_column not in df.columns:
             raise MLException(f"Target column '{target_column}' not found in dataframe")
-        
-        if df.empty:
-            raise MLException("Empty dataframe provided")
-        
-        # Step 1: Detect task type
+        if time_column is not None and time_column not in df.columns:
+            raise MLException(f"Time column '{time_column}' not found in dataframe")
+        if time_column == target_column:
+            raise MLException("The time column cannot also be the target")
+        self._target_column = target_column
+
+        # Step 1: never impute the target.
+        known = df[target_column].notna()
+        n_missing_target = int((~known).sum())
+        data = df.loc[known]
+        if n_missing_target:
+            run_warnings.append(
+                f"Dropped {n_missing_target:,} rows with no value for '{target_column}'; "
+                "the target is never imputed."
+            )
+
+        # Step 2: settle the task.
         if task is None:
-            task = self._detect_task(df[target_column])
-            if self.verbose:
-                logger.info(f"Auto-detected task: {task.value}", context=context)
+            task = self._detect_task(data[target_column])
+        task = self._normalise_task(task, data[target_column])
         self._task = task
-        
-        # Step 2: Preprocess data
-        if self.verbose:
-            logger.info("Preprocessing data...", context=context)
-        
-        preprocess_start = datetime.utcnow()
-        try:
-            prep_result = self._preprocess_data(df, target_column, exclude_columns)
-            X, y, feature_names = prep_result.X, prep_result.y, prep_result.feature_names
-        except Exception as e:
-            logger.error(f"Preprocessing failed: {e}", context=context)
-            raise MLException(f"Data preprocessing failed: {e}")
-        
-        preprocess_time = (datetime.utcnow() - preprocess_start).total_seconds()
-        
-        if self.verbose:
-            logger.info(f"Preprocessed: {X.shape[0]} samples, {X.shape[1]} features", context=context)
-        
-        # Handle case where preprocessing removed all data
-        if X.shape[0] == 0 or X.shape[1] == 0:
-            raise MLException("No valid data remaining after preprocessing")
-        
-        # Step 3: Train/test split
-        X_train, X_test, y_train, y_test = self._smart_split(X, y, task)
-        
-        if self.verbose:
-            logger.info(f"Split: {len(X_train)} train, {len(X_test)} test", context=context)
-        
-        # Step 4: Select models
+        is_classification = task in _CLASSIFICATION_TASKS
+
+        # Step 3: time ordering (drop rows whose time is unknown).
+        time_values: Optional[pd.Series] = None
+        if time_column is not None:
+            from app.ml.tabular_pipeline import _to_datetime
+
+            time_values = _to_datetime(data[time_column])
+            unknown_time = int(time_values.isna().sum())
+            if unknown_time:
+                run_warnings.append(
+                    f"Dropped {unknown_time:,} rows with no usable '{time_column}' value for the time-ordered split."
+                )
+                keep = time_values.notna()
+                data = data.loc[keep]
+                time_values = time_values.loc[keep]
+
+        min_rows = 20
+        if len(data) < min_rows:
+            raise MLException(
+                f"Need at least {min_rows} rows with a known '{target_column}' to train and evaluate a model; "
+                f"found {len(data):,}."
+            )
+
+        # Step 4: features, minus anything that leaks the target.
+        exclude = set(exclude_columns or []) | {target_column}
+        feature_cols = [c for c in data.columns if c not in exclude]
+        leakage = self._screen_leakage(data[feature_cols], data[target_column], task)
+        if leakage:
+            names = [item["column"] for item in leakage]
+            if self.exclude_leaky_columns:
+                feature_cols = [c for c in feature_cols if c not in set(names)]
+                run_warnings.append(
+                    "Excluded columns that give away the target: "
+                    + "; ".join(f"{i['column']} ({i['reason']})" for i in leakage)
+                )
+            else:
+                run_warnings.append(
+                    "Possible target leakage (kept because exclusion is disabled): "
+                    + "; ".join(f"{i['column']} ({i['reason']})" for i in leakage)
+                )
+        if not feature_cols:
+            raise MLException("No feature columns remain after removing the target and excluded columns")
+        self._input_columns = [str(c) for c in feature_cols]
+
+        X = data[feature_cols].copy()
+        X.columns = self._input_columns
+        y = self._encode_target(data[target_column], task)
+
+        # Step 5: split.
+        split_info: Dict[str, Any]
+        if time_values is not None:
+            order = np.argsort(time_values.to_numpy(), kind="stable")
+            X = X.iloc[order]
+            y = y[order]
+            ordered_time = time_values.iloc[order]
+            n_test = max(1, int(round(len(X) * self.test_size)))
+            cut = len(X) - n_test
+            X_train, X_test = X.iloc[:cut], X.iloc[cut:]
+            y_train, y_test = y[:cut], y[cut:]
+            split_info = {
+                "strategy": "time_ordered",
+                "time_column": time_column,
+                "train_period": [str(ordered_time.iloc[0]), str(ordered_time.iloc[cut - 1])],
+                "test_period": [str(ordered_time.iloc[cut]), str(ordered_time.iloc[-1])],
+            }
+            if is_classification and len(np.unique(y_test)) < 2:
+                run_warnings.append(
+                    "The most recent period contains only one class, so ranking metrics such as ROC AUC "
+                    "cannot be computed on the held-out split."
+                )
+        else:
+            stratify = None
+            if is_classification and np.bincount(y).min() >= 2:
+                stratify = y
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=self.test_size, random_state=self.random_state, stratify=stratify
+            )
+            split_info = {"strategy": "stratified_random" if stratify is not None else "random"}
+        split_info.update({"train_rows": int(len(X_train)), "test_rows": int(len(X_test))})
+
+        if is_classification and len(np.unique(y_train)) < 2:
+            raise MLException("The training split contains a single class; there is nothing to learn")
+
+        cv = self._get_cv_strategy(task, y_train, time_ordered=time_values is not None)
+        scoring = self._get_scoring(task)
+
+        # Step 6: baseline.
+        baseline_pipe, baseline_result = self._train_single_model(
+            model_name="baseline",
+            X_train=X_train, X_test=X_test, y_train=y_train, y_test=y_test,
+            task=task, cv=cv, scoring=scoring, optimize=False, is_baseline=True,
+        )
+        self._baseline = (baseline_pipe, baseline_result)
+
+        # Step 7: candidate models.
         if models is None:
-            models = self._select_models(X_train, task, max_models)
-            if self.verbose:
-                logger.info(f"Selected models: {models}", context=context)
-        
-        # Step 5: Train each model
-        results = []
+            models = self._select_models(len(X_train), task, max_models)
+        results: List[ModelTrainingResult] = []
         for model_name in models:
             try:
                 if self.verbose:
                     logger.info(f"Training {model_name}...", context=context)
-                
-                result = self._train_single_model(
+                pipe, result = self._train_single_model(
                     model_name=model_name,
-                    X_train=X_train,
-                    X_test=X_test,
-                    y_train=y_train,
-                    y_test=y_test,
-                    feature_names=feature_names,
-                    target_column=target_column,
-                    task=task,
-                    optimize=optimize,
-                    preprocess_time=preprocess_time,
-                    prep_summary=prep_result.__dict__
+                    X_train=X_train, X_test=X_test, y_train=y_train, y_test=y_test,
+                    task=task, cv=cv, scoring=scoring, optimize=optimize, is_baseline=False,
                 )
-                
+                self._trained_models[model_name] = (pipe, result)
                 results.append(result)
-                self._trained_models[model_name] = (
-                    self._trained_models.get(model_name, (None, None))[0],
-                    result
-                )
-                
-                if self.verbose:
-                    logger.info(
-                        f"{model_name}: CV={result.cv_mean:.4f} (+/- {result.cv_std:.4f})",
-                        context=context
-                    )
-                    
             except Exception as e:
                 logger.error(f"Training {model_name} failed: {e}", context=context)
-                logger.error(traceback.format_exc())
-                
-                # Create failure result
-                results.append(ModelTrainingResult(
+                failed = ModelTrainingResult(
                     model_name=model_name,
                     task=task,
                     status=ModelStatus.FAILED,
-                    errors=[str(e)]
-                ))
-        
-        # Sort by performance
-        successful = [r for r in results if r.status == ModelStatus.COMPLETED]
-        if successful:
-            if task == MLTask.REGRESSION:
-                successful.sort(key=lambda r: r.test_metrics.get('r2', 0), reverse=True)
-            else:
-                successful.sort(key=lambda r: r.cv_mean, reverse=True)
-            
-            self._best_model_name = successful[0].model_name
-            
-            if self.verbose:
-                logger.info(f"Best model: {self._best_model_name}", context=context)
-        
-        # Add failed results at the end
+                    target_column=target_column,
+                    errors=[str(e)],
+                )
+                self._trained_models[model_name] = (None, failed)
+                results.append(failed)
+
+        # Step 8: select by cross-validation only.
+        completed = [r for r in results if r.status == ModelStatus.COMPLETED]
+        scored = sorted((r for r in completed if r.cv_mean is not None), key=lambda r: r.cv_mean, reverse=True)
+        unscored = [r for r in completed if r.cv_mean is None]
         failed = [r for r in results if r.status == ModelStatus.FAILED]
-        results = successful + failed
-        
+        if scored:
+            best = scored[0]
+        elif unscored:
+            best = unscored[0]
+            run_warnings.append(
+                "Cross-validation failed for every model, so the chosen model has not been validated; "
+                "treat its scores with caution."
+            )
+        else:
+            details = "; ".join(f"{r.model_name}: {r.errors[0] if r.errors else 'unknown error'}" for r in failed)
+            raise MLException(f"Every model failed to train ({details})")
+        self._best_model_name = best.model_name
+
+        # Step 9: explain the chosen model on held-out rows.
+        best_pipe = self._trained_models[best.model_name][0]
+        importance, importance_note = self._permutation_importance(best_pipe, X_test, y_test, scoring)
+        best.feature_importance = importance
+        if importance_note:
+            run_warnings.append(importance_note)
+
+        # Step 10: compare with the baseline, fold by fold.
+        beats_baseline: Optional[bool] = None
+        improvement = self._paired_improvement(best, baseline_result)
+        if improvement is not None:
+            beats_baseline = bool(
+                improvement["mean"] > _BASELINE_MARGIN and improvement["ci95_low"] > 0.0
+            )
+            if not beats_baseline:
+                run_warnings.append(
+                    f"The best model ({best.display_name}, CV {scoring} {best.cv_mean:.4f}) does not beat the "
+                    f"naive baseline (CV {scoring} {baseline_result.cv_mean:.4f}) by a meaningful margin. "
+                    f"The available columns may carry little signal about '{target_column}'."
+                )
+
+        prep_summary = best.preprocessing_summary
         total_time = (datetime.utcnow() - total_start).total_seconds()
         for r in results:
             r.total_time_sec = total_time
-        
-        return results
-    
+        best.warnings = list(dict.fromkeys(run_warnings + best.warnings))
+
+        self.training_report = {
+            "target_column": target_column,
+            "task": task.value,
+            "classes": list(self._classes) if self._classes is not None else None,
+            "rows_used": int(len(X)),
+            "rows_dropped_missing_target": n_missing_target,
+            "split": split_info,
+            "cross_validation": {
+                "strategy": type(cv).__name__,
+                "folds": int(cv.get_n_splits()),
+                "scoring": scoring,
+                "selection": "highest mean cross-validation score on the training split",
+            },
+            "baseline": {
+                "model": baseline_result.display_name,
+                "cv_mean": _round_or_none(baseline_result.cv_mean),
+                "test_metrics": {k: _round_or_none(v) for k, v in baseline_result.test_metrics.items()},
+            },
+            "best_model": best.model_name,
+            "best_cv_mean": _round_or_none(best.cv_mean),
+            "beats_baseline": beats_baseline,
+            "improvement_over_baseline": improvement,
+            "excluded_leaky_columns": leakage if self.exclude_leaky_columns else [],
+            "preprocessing": prep_summary,
+            "importance_method": "permutation importance on the held-out split",
+            "warnings": run_warnings,
+        }
+        if self.verbose:
+            logger.info(f"Best model: {best.model_name}", context=context)
+        return scored + unscored + failed
+
+    def get_best_model(self) -> Tuple[str, Pipeline, ModelTrainingResult]:
+        """Get the best performing model as (name, fitted pipeline, result)."""
+        if self._best_model_name is None:
+            raise MLException("No models have been trained")
+        pipe, result = self._trained_models[self._best_model_name]
+        return self._best_model_name, pipe, result
+
+    def build_bundle(self, model_name: Optional[str] = None):
+        """Package a trained pipeline with everything needed to score raw rows."""
+        from app.ml.tabular_pipeline import ModelBundle
+
+        name = model_name or self._best_model_name
+        if name is None or name not in self._trained_models or self._trained_models[name][0] is None:
+            raise MLException("No trained model available to package")
+        pipe, result = self._trained_models[name]
+        info = dict(self.training_report)
+        info.update(
+            {
+                "model_cv_mean": _round_or_none(result.cv_mean),
+                "model_test_metrics": {k: _round_or_none(v) for k, v in result.test_metrics.items()},
+                "model_feature_importance": {k: _round_or_none(v, 6) for k, v in result.feature_importance.items()},
+                "best_params": result.best_params,
+            }
+        )
+        return ModelBundle(
+            pipeline=pipe,
+            task=self._task.value if self._task else result.task.value,
+            target_column=self._target_column,
+            model_name=name,
+            input_columns=list(self._input_columns),
+            classes=list(self._classes) if self._classes is not None else None,
+            used_columns=list(pipe.named_steps["prep"].column_roles_.keys()),
+            training_info=info,
+        )
+
+    def predict(self, df: pd.DataFrame, model_name: Optional[str] = None) -> List[Any]:
+        """Predict raw rows with a trained model (labels decoded for classification)."""
+        return self.build_bundle(model_name).predict(df)
+
+    @staticmethod
+    def _paired_improvement(
+        best: ModelTrainingResult, baseline: ModelTrainingResult
+    ) -> Optional[Dict[str, Any]]:
+        """Fold-by-fold gain over the baseline with a 95% t-interval.
+
+        Both models are scored on identical folds, so the per-fold difference is
+        the fair comparison; a gain whose interval includes zero is not counted
+        as beating the baseline.
+        """
+        a = np.asarray(best.cv_scores.get("test") or [], dtype=float)
+        b = np.asarray(baseline.cv_scores.get("test") or [], dtype=float)
+        if a.size == 0 or a.size != b.size:
+            return None
+        diff = a - b
+        diff = diff[np.isfinite(diff)]
+        if diff.size < 2:
+            return None
+        mean = float(diff.mean())
+        se = float(diff.std(ddof=1) / np.sqrt(diff.size))
+        from scipy import stats
+
+        t_crit = float(stats.t.ppf(0.975, df=diff.size - 1))
+        return {
+            "metric": best.cv_scoring,
+            "mean": round(mean, 4),
+            "ci95_low": round(mean - t_crit * se, 4),
+            "ci95_high": round(mean + t_crit * se, 4),
+            "folds": int(diff.size),
+        }
+
+    # ------------------------------------------------------------------
+    # Task and target handling
+    # ------------------------------------------------------------------
     def _detect_task(self, target: pd.Series) -> MLTask:
         """Automatically detect the ML task from target variable."""
-        # Remove nulls for analysis
         target_clean = target.dropna()
-        
         if len(target_clean) == 0:
             raise MLException("Target column has no valid values")
-        
-        # Check for numeric
+        if pd.api.types.is_bool_dtype(target_clean):
+            return MLTask.BINARY_CLASSIFICATION
         if pd.api.types.is_numeric_dtype(target_clean):
             n_unique = target_clean.nunique()
-            
-            # Binary classification
             if n_unique == 2:
                 return MLTask.BINARY_CLASSIFICATION
-            
-            # Few unique values - likely classification
             if n_unique <= 10 and n_unique / len(target_clean) < 0.05:
                 return MLTask.MULTICLASS_CLASSIFICATION
-            
-            # Check if values are actually discrete
-            if all(float(x).is_integer() for x in target_clean.head(100)):
-                if n_unique <= 20:
-                    return MLTask.MULTICLASS_CLASSIFICATION
-            
+            if n_unique <= 20 and all(float(x).is_integer() for x in target_clean.head(100)):
+                return MLTask.MULTICLASS_CLASSIFICATION
             return MLTask.REGRESSION
-        
-        # Categorical/string target
         n_unique = target_clean.nunique()
         if n_unique == 2:
             return MLTask.BINARY_CLASSIFICATION
         return MLTask.MULTICLASS_CLASSIFICATION
-    
-    def _preprocess_data(
-        self,
-        df: pd.DataFrame,
-        target_column: str,
-        exclude_columns: Optional[List[str]]
-    ) -> PreprocessingResult:
-        """Preprocess data using universal handler."""
-        self._preprocessor = UniversalDataPreprocessor(
-            max_categories_onehot=10,
-            outlier_handling='clip',
-            null_threshold_drop=0.7,
-            verbose=self.verbose
-        )
-        
-        result = self._preprocessor.fit_transform(
-            df=df,
-            target_column=target_column,
-            exclude_columns=exclude_columns
-        )
-        
-        return result
-    
-    def _smart_split(
-        self,
-        X: np.ndarray,
-        y: np.ndarray,
-        task: MLTask
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Smart train/test split based on task."""
-        if task in [MLTask.BINARY_CLASSIFICATION, MLTask.MULTICLASS_CLASSIFICATION]:
-            # Stratified split for classification
+
+    def _normalise_task(self, task: MLTask, target: pd.Series) -> MLTask:
+        if task in _CLASSIFICATION_TASKS:
+            n_classes = int(target.nunique(dropna=True))
+            if n_classes < 2:
+                raise MLException("The target has a single class; there is nothing to predict")
+            return MLTask.BINARY_CLASSIFICATION if n_classes == 2 else MLTask.MULTICLASS_CLASSIFICATION
+        if task == MLTask.REGRESSION:
+            numeric = pd.to_numeric(target, errors="coerce")
+            bad = int(numeric.isna().sum())
+            if bad:
+                raise MLException(
+                    f"Regression needs a numeric target; {bad:,} values of '{target.name}' are not numbers"
+                )
+            return task
+        raise MLException(f"Task '{task.value}' is not supported by the AutoML engine")
+
+    def _encode_target(self, target: pd.Series, task: MLTask) -> np.ndarray:
+        if task not in _CLASSIFICATION_TASKS:
+            self._classes = None
+            return pd.to_numeric(target, errors="coerce").to_numpy(dtype=float)
+        values = target
+        if not (pd.api.types.is_numeric_dtype(values) or pd.api.types.is_bool_dtype(values)):
+            values = values.astype(str)
+        classes = [_python_scalar(v) for v in sorted(pd.unique(values))]
+        mapping = {c: i for i, c in enumerate(classes)}
+        self._classes = classes
+        return values.map(lambda v: mapping[_python_scalar(v)]).to_numpy(dtype=int)
+
+    def _screen_leakage(self, X: pd.DataFrame, target: pd.Series, task: MLTask) -> List[Dict[str, str]]:
+        """Find columns that copy or deterministically encode the target."""
+        findings: List[Dict[str, str]] = []
+        target_text = target.astype(str)
+        n_target_classes = int(target.nunique(dropna=True))
+        for col in X.columns:
+            s = X[col]
+            mask = s.notna()
+            if int(mask.sum()) < 20:
+                continue
+            s_known, t_known = s[mask], target[mask]
             try:
-                return train_test_split(
-                    X, y,
-                    test_size=self.test_size,
-                    random_state=self.random_state,
-                    stratify=y
-                )
-            except ValueError:
-                # Fall back to non-stratified if stratification fails
-                return train_test_split(
-                    X, y,
-                    test_size=self.test_size,
-                    random_state=self.random_state
-                )
-        else:
-            return train_test_split(
-                X, y,
-                test_size=self.test_size,
-                random_state=self.random_state
-            )
-    
-    def _select_models(
-        self,
-        X: np.ndarray,
-        task: MLTask,
-        max_models: int
-    ) -> List[str]:
-        """Intelligently select models based on data characteristics."""
-        n_samples, n_features = X.shape
-        
-        # Get all models for the task
+                if float((s_known.astype(str) == target_text[mask]).mean()) >= 0.995:
+                    findings.append({"column": str(col), "reason": "identical to the target"})
+                    continue
+                if task in _CLASSIFICATION_TASKS and n_target_classes >= 2:
+                    n_values = int(s_known.nunique())
+                    if 2 <= n_values <= max(20, int(0.05 * len(s_known))):
+                        purity = (
+                            pd.crosstab(s_known.astype(str), t_known.astype(str)).max(axis=1).sum()
+                            / float(len(s_known))
+                        )
+                        if purity >= 0.995:
+                            findings.append(
+                                {"column": str(col), "reason": "each of its values maps to exactly one target class"}
+                            )
+                            continue
+                if task == MLTask.REGRESSION and pd.api.types.is_numeric_dtype(s_known):
+                    corr = float(pd.to_numeric(t_known, errors="coerce").corr(s_known.astype(float)))
+                    if np.isfinite(corr) and abs(corr) >= 0.995:
+                        findings.append(
+                            {"column": str(col), "reason": f"correlation with the target is {corr:.3f}"}
+                        )
+            except Exception:
+                continue
+        return findings
+
+    # ------------------------------------------------------------------
+    # Model selection and training
+    # ------------------------------------------------------------------
+    def _select_models(self, n_samples: int, task: MLTask, max_models: int) -> List[str]:
+        """Pick candidate models suited to the task and data size."""
         available = ModelLibrary.get_for_task(task, max_count=20)
-        
-        # Prioritize based on data size
-        if n_samples > 100000:
-            # Prefer fast models for large data
-            preferred = ['lightgbm_classifier', 'lightgbm_regressor',
-                        'hist_gradient_boosting_classifier', 'hist_gradient_boosting_regressor',
-                        'xgboost_classifier', 'xgboost_regressor']
-        elif n_samples < 1000:
-            # Prefer regularized models for small data
-            preferred = ['logistic_regression', 'ridge_regression', 'elastic_net',
-                        'random_forest_classifier', 'random_forest_regressor']
+        if task in _CLASSIFICATION_TASKS:
+            if n_samples > 100_000:
+                preferred = ["lightgbm_classifier", "hist_gradient_boosting_classifier", "xgboost_classifier",
+                             "logistic_regression"]
+            elif n_samples < 1000:
+                preferred = ["logistic_regression", "random_forest_classifier",
+                             "hist_gradient_boosting_classifier", "gradient_boosting_classifier"]
+            else:
+                preferred = ["hist_gradient_boosting_classifier", "logistic_regression",
+                             "random_forest_classifier", "xgboost_classifier", "lightgbm_classifier"]
         else:
-            # Mix for medium data
-            preferred = ['xgboost_classifier', 'xgboost_regressor',
-                        'lightgbm_classifier', 'lightgbm_regressor',
-                        'random_forest_classifier', 'random_forest_regressor',
-                        'gradient_boosting_classifier']
-        
-        # Filter to available and add any extras
+            if n_samples > 100_000:
+                preferred = ["hist_gradient_boosting_regressor", "xgboost_regressor", "ridge_regression"]
+            elif n_samples < 1000:
+                preferred = ["ridge_regression", "random_forest_regressor",
+                             "hist_gradient_boosting_regressor", "elastic_net"]
+            else:
+                preferred = ["hist_gradient_boosting_regressor", "ridge_regression",
+                             "random_forest_regressor", "xgboost_regressor"]
         selected = [m for m in preferred if m in available]
-        
-        # Add remaining models if needed
         for m in available:
-            if m not in selected and len(selected) < max_models:
+            if m not in selected:
                 selected.append(m)
-        
-        return selected[:max_models]
-    
+        return selected[: max(1, int(max_models))]
+
+    def _make_pipeline(self, estimator: BaseEstimator) -> Pipeline:
+        from app.ml.tabular_pipeline import TabularPreprocessor
+
+        return Pipeline(
+            [
+                ("prep", TabularPreprocessor(max_onehot_categories=self.max_onehot_categories)),
+                ("model", estimator),
+            ]
+        )
+
     def _train_single_model(
         self,
         model_name: str,
-        X_train: np.ndarray,
-        X_test: np.ndarray,
+        X_train: pd.DataFrame,
+        X_test: pd.DataFrame,
         y_train: np.ndarray,
         y_test: np.ndarray,
-        feature_names: List[str],
-        target_column: str,
         task: MLTask,
+        cv: Any,
+        scoring: str,
         optimize: bool,
-        preprocess_time: float,
-        prep_summary: Dict
-    ) -> ModelTrainingResult:
-        """Train a single model with optional optimization."""
+        is_baseline: bool,
+    ) -> Tuple[Pipeline, ModelTrainingResult]:
+        """Cross-validate, fit and evaluate one model inside a leakage-safe pipeline."""
         train_start = datetime.utcnow()
-        
-        config = ModelLibrary.get(model_name)
+        is_classification = task in _CLASSIFICATION_TASKS
+        if is_baseline:
+            if is_classification:
+                estimator = DummyClassifier(strategy="prior")
+                display = "Baseline (always predicts class frequencies)"
+            else:
+                estimator = DummyRegressor(strategy="mean")
+                display = "Baseline (always predicts the training mean)"
+            config = None
+        else:
+            config = ModelLibrary.get(model_name)
+            estimator = config.estimator_class(**config.default_params)
+            display = config.display_name
+
+        pipe = self._make_pipeline(estimator)
         result = ModelTrainingResult(
             model_name=model_name,
-            display_name=config.display_name,
+            display_name=display,
             task=task,
             status=ModelStatus.TRAINING,
+            is_baseline=is_baseline,
             n_samples_train=len(X_train),
             n_samples_test=len(X_test),
-            n_features=X_train.shape[1],
-            feature_names=feature_names,
-            target_column=target_column,
-            preprocessing_time_sec=preprocess_time,
-            preprocessing_summary={"dropped_columns": prep_summary.get("dropped_columns", []),
-                                  "warnings": prep_summary.get("warnings", [])}
+            target_column=self._target_column,
+            cv_scoring=scoring,
         )
-        
-        # Create base estimator
-        params = config.default_params.copy()
-        estimator = config.estimator_class(**params)
-        
-        # Hyperparameter optimization
+
+        # Hyperparameter search (inside the same CV folds, on training rows only).
         opt_start = datetime.utcnow()
-        if optimize and config.search_space and self.optimization_strategy != OptimizationStrategy.NONE:
+        if (
+            optimize
+            and config is not None
+            and config.search_space
+            and self.optimization_strategy != OptimizationStrategy.NONE
+        ):
             try:
-                best_params = self._optimize_hyperparameters(
-                    estimator=estimator,
-                    search_space=config.search_space,
-                    X=X_train,
-                    y=y_train,
-                    task=task
-                )
-                params.update(best_params)
+                best_params = self._optimize_hyperparameters(pipe, config.search_space, X_train, y_train, cv, scoring)
+                pipe.set_params(**{f"model__{k}": v for k, v in best_params.items()})
                 result.best_params = best_params
                 result.optimization_trials = self.optimization_trials
-                estimator = config.estimator_class(**params)
             except Exception as e:
-                result.warnings.append(f"Optimization failed: {e}, using defaults")
-        
+                result.warnings.append(f"Hyperparameter search failed ({e}); default settings were used")
         result.optimization_time_sec = (datetime.utcnow() - opt_start).total_seconds()
-        
-        # Cross-validation
-        cv = self._get_cv_strategy(task, y_train)
-        scoring = self._get_scoring(task)
-        
+
+        # Cross-validation on the training split.
         try:
-            cv_results = cross_validate(
-                estimator, X_train, y_train,
-                cv=cv,
-                scoring=scoring,
-                n_jobs=self.n_jobs,
-                return_train_score=True
-            )
-            
-            result.cv_scores = {
-                'test': cv_results[f'test_{scoring}'].tolist(),
-                'train': cv_results[f'train_{scoring}'].tolist()
-            }
-            result.cv_mean = float(cv_results[f'test_{scoring}'].mean())
-            result.cv_std = float(cv_results[f'test_{scoring}'].std())
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                cv_results = cross_validate(
+                    pipe, X_train, y_train,
+                    cv=cv, scoring=scoring, n_jobs=self.n_jobs,
+                    return_train_score=True, error_score=np.nan,
+                )
+            fold_scores = np.asarray(cv_results["test_score"], dtype=float)
+            train_scores = np.asarray(cv_results["train_score"], dtype=float)
+            finite = fold_scores[np.isfinite(fold_scores)]
+            result.cv_scores = {"test": fold_scores.tolist(), "train": train_scores.tolist()}
+            if finite.size == 0:
+                result.warnings.append(f"Cross-validation could not compute {scoring} on any fold")
+            else:
+                if finite.size < fold_scores.size:
+                    result.warnings.append(
+                        f"Cross-validation failed on {fold_scores.size - finite.size} of {fold_scores.size} folds; "
+                        "the score averages the remaining folds"
+                    )
+                result.cv_mean = float(finite.mean())
+                result.cv_std = float(finite.std())
         except Exception as e:
-            result.warnings.append(f"CV failed: {e}")
-            result.cv_mean = 0.0
-            result.cv_std = 0.0
-        
-        # Fit on full training data
-        estimator.fit(X_train, y_train)
-        self._trained_models[model_name] = (estimator, result)
-        
-        # Predictions
-        y_train_pred = estimator.predict(X_train)
-        y_test_pred = estimator.predict(X_test)
-        
-        # Calculate metrics
-        if task == MLTask.REGRESSION:
+            result.warnings.append(f"Cross-validation failed: {e}")
+
+        # Final fit on the whole training split, then a single held-out evaluation.
+        pipe.fit(X_train, y_train)
+        y_train_pred = pipe.predict(X_train)
+        y_test_pred = pipe.predict(X_test)
+        if is_classification:
+            n_classes = len(self._classes or [])
+            result.train_metrics = self._classification_metrics(y_train, y_train_pred, pipe, X_train, n_classes)
+            result.test_metrics = self._classification_metrics(y_test, y_test_pred, pipe, X_test, n_classes)
+        else:
             result.train_metrics = self._regression_metrics(y_train, y_train_pred)
             result.test_metrics = self._regression_metrics(y_test, y_test_pred)
-        else:
-            result.train_metrics = self._classification_metrics(
-                y_train, y_train_pred, estimator, X_train
-            )
-            result.test_metrics = self._classification_metrics(
-                y_test, y_test_pred, estimator, X_test
-            )
-        
-        # Feature importance
-        if config.supports_feature_importance:
-            result.feature_importance = self._get_feature_importance(
-                estimator, feature_names
-            )
-        
+
+        prep = pipe.named_steps["prep"]
+        result.feature_names = [str(n) for n in prep.get_feature_names_out()]
+        result.n_features = len(result.feature_names)
+        result.preprocessing_summary = prep.summary()
         result.training_time_sec = (datetime.utcnow() - train_start).total_seconds()
         result.status = ModelStatus.COMPLETED
-        
-        return result
-    
+        return pipe, result
+
     def _optimize_hyperparameters(
         self,
-        estimator: BaseEstimator,
+        pipe: Pipeline,
         search_space: Dict[str, Any],
-        X: np.ndarray,
+        X: pd.DataFrame,
         y: np.ndarray,
-        task: MLTask
+        cv: Any,
+        scoring: str,
     ) -> Dict[str, Any]:
-        """Optimize hyperparameters using Optuna or fallback."""
+        """Search hyperparameters with the same CV folds used for model selection."""
         if self.optimization_strategy == OptimizationStrategy.BAYESIAN and HAS_OPTUNA:
-            return self._optuna_optimize(estimator, search_space, X, y, task)
-        else:
-            return self._random_search_optimize(estimator, search_space, X, y, task)
-    
-    def _optuna_optimize(
-        self,
-        estimator: BaseEstimator,
-        search_space: Dict[str, Any],
-        X: np.ndarray,
-        y: np.ndarray,
-        task: MLTask
-    ) -> Dict[str, Any]:
-        """Bayesian optimization using Optuna."""
+            return self._optuna_optimize(pipe, search_space, X, y, cv, scoring)
+        return self._random_search_optimize(pipe, search_space, X, y, cv, scoring)
+
+    def _optuna_optimize(self, pipe, search_space, X, y, cv, scoring) -> Dict[str, Any]:
         def objective(trial):
             params = {}
             for param_name, spec in search_space.items():
                 if spec["type"] == "int":
-                    params[param_name] = trial.suggest_int(
-                        param_name, spec["low"], spec["high"]
-                    )
+                    params[param_name] = trial.suggest_int(param_name, spec["low"], spec["high"])
                 elif spec["type"] == "float":
                     params[param_name] = trial.suggest_float(
-                        param_name, spec["low"], spec["high"],
-                        log=spec.get("log", False)
+                        param_name, spec["low"], spec["high"], log=spec.get("log", False)
                     )
                 elif spec["type"] == "categorical":
-                    params[param_name] = trial.suggest_categorical(
-                        param_name, spec["choices"]
-                    )
-            
-            # Create model with suggested params
-            model = clone(estimator)
-            model.set_params(**params)
-            
-            # Quick CV
-            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42) \
-                if task != MLTask.REGRESSION else KFold(n_splits=3, shuffle=True, random_state=42)
-            
-            scoring = self._get_scoring(task)
-            try:
-                scores = cross_val_score(model, X, y, cv=cv, scoring=scoring, n_jobs=1)
-                return scores.mean()
-            except:
-                return 0.0
-        
-        # Run optimization
+                    params[param_name] = trial.suggest_categorical(param_name, spec["choices"])
+            candidate = clone(pipe).set_params(**{f"model__{k}": v for k, v in params.items()})
+            scores = cross_val_score(candidate, X, y, cv=cv, scoring=scoring, n_jobs=1, error_score="raise")
+            return float(np.mean(scores))
+
         sampler = TPESampler(seed=self.random_state)
-        study = optuna.create_study(direction='maximize', sampler=sampler)
+        study = optuna.create_study(direction="maximize", sampler=sampler)
         study.optimize(
             objective,
             n_trials=self.optimization_trials,
             timeout=self.optimization_timeout,
             show_progress_bar=False,
-            n_jobs=1
+            n_jobs=1,
+            catch=(Exception,),
         )
-        
-        return study.best_params
-    
-    def _random_search_optimize(
-        self,
-        estimator: BaseEstimator,
-        search_space: Dict[str, Any],
-        X: np.ndarray,
-        y: np.ndarray,
-        task: MLTask
-    ) -> Dict[str, Any]:
-        """Random search optimization."""
-        # Convert search space to sklearn format
-        param_distributions = {}
+        return study.best_params  # raises if every trial failed
+
+    def _random_search_optimize(self, pipe, search_space, X, y, cv, scoring) -> Dict[str, Any]:
+        distributions = {}
         for param_name, spec in search_space.items():
             if spec["type"] == "int":
-                param_distributions[param_name] = list(range(spec["low"], spec["high"] + 1))
+                values = list(range(int(spec["low"]), int(spec["high"]) + 1))
             elif spec["type"] == "float":
-                param_distributions[param_name] = np.linspace(spec["low"], spec["high"], 20).tolist()
-            elif spec["type"] == "categorical":
-                param_distributions[param_name] = spec["choices"]
-        
-        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42) \
-            if task != MLTask.REGRESSION else KFold(n_splits=3, shuffle=True, random_state=42)
-        
+                if spec.get("log"):
+                    values = np.geomspace(spec["low"], spec["high"], 20).tolist()
+                else:
+                    values = np.linspace(spec["low"], spec["high"], 20).tolist()
+            else:
+                values = list(spec["choices"])
+            distributions[f"model__{param_name}"] = values
         search = RandomizedSearchCV(
-            estimator,
-            param_distributions,
-            n_iter=min(self.optimization_trials, 20),
+            pipe,
+            distributions,
+            n_iter=max(1, min(self.optimization_trials, 20)),
             cv=cv,
-            scoring=self._get_scoring(task),
+            scoring=scoring,
             random_state=self.random_state,
-            n_jobs=self.n_jobs
+            n_jobs=self.n_jobs,
+            error_score=np.nan,
         )
-        search.fit(X, y)
-        
-        return search.best_params_
-    
-    def _get_cv_strategy(self, task: MLTask, y: np.ndarray):
-        """Get appropriate cross-validation strategy."""
-        if task in [MLTask.BINARY_CLASSIFICATION, MLTask.MULTICLASS_CLASSIFICATION]:
-            return StratifiedKFold(
-                n_splits=self.cv_folds,
-                shuffle=True,
-                random_state=self.random_state
-            )
-        elif task == MLTask.TIME_SERIES:
-            return TimeSeriesSplit(n_splits=self.cv_folds)
-        else:
-            return KFold(
-                n_splits=self.cv_folds,
-                shuffle=True,
-                random_state=self.random_state
-            )
-    
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            search.fit(X, y)
+        if not np.isfinite(search.best_score_):
+            raise MLException("every hyperparameter candidate failed")
+        return {k.replace("model__", "", 1): v for k, v in search.best_params_.items()}
+
+    def _get_cv_strategy(self, task: MLTask, y: np.ndarray, time_ordered: bool = False):
+        """Cross-validation that matches how the model will be used."""
+        n = len(y)
+        if time_ordered:
+            return TimeSeriesSplit(n_splits=max(2, min(self.cv_folds, n // 10)))
+        if task in _CLASSIFICATION_TASKS:
+            min_class = int(np.bincount(y).min()) if n else 0
+            if min_class >= 2:
+                return StratifiedKFold(
+                    n_splits=max(2, min(self.cv_folds, min_class)),
+                    shuffle=True,
+                    random_state=self.random_state,
+                )
+        return KFold(n_splits=max(2, min(self.cv_folds, n // 2)), shuffle=True, random_state=self.random_state)
+
     def _get_scoring(self, task: MLTask) -> str:
         """Get scoring metric for task."""
         if self.scoring:
             return self.scoring
-        
         if task == MLTask.BINARY_CLASSIFICATION:
-            return 'roc_auc'
-        elif task == MLTask.MULTICLASS_CLASSIFICATION:
-            return 'f1_weighted'
-        elif task == MLTask.REGRESSION:
-            return 'r2'
-        else:
-            return 'accuracy'
-    
+            return "roc_auc"
+        if task == MLTask.MULTICLASS_CLASSIFICATION:
+            return "f1_weighted"
+        if task == MLTask.REGRESSION:
+            return "r2"
+        return "accuracy"
+
+    # ------------------------------------------------------------------
+    # Metrics and explanations
+    # ------------------------------------------------------------------
     def _classification_metrics(
         self,
         y_true: np.ndarray,
         y_pred: np.ndarray,
-        model: BaseEstimator,
-        X: np.ndarray
+        model: Any,
+        X: pd.DataFrame,
+        n_classes: int,
     ) -> Dict[str, float]:
-        """Calculate comprehensive classification metrics."""
         metrics = {
-            'accuracy': float(accuracy_score(y_true, y_pred)),
-            'balanced_accuracy': float(balanced_accuracy_score(y_true, y_pred)),
-            'precision': float(precision_score(y_true, y_pred, average='weighted', zero_division=0)),
-            'recall': float(recall_score(y_true, y_pred, average='weighted', zero_division=0)),
-            'f1': float(f1_score(y_true, y_pred, average='weighted', zero_division=0))
+            "accuracy": float(accuracy_score(y_true, y_pred)),
+            "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+            "precision": float(precision_score(y_true, y_pred, average="weighted", zero_division=0)),
+            "recall": float(recall_score(y_true, y_pred, average="weighted", zero_division=0)),
+            "f1": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
         }
-        
-        # Binary classification extras
-        n_classes = len(np.unique(y_true))
-        if n_classes == 2 and hasattr(model, 'predict_proba'):
+        present = np.unique(y_true)
+        if hasattr(model, "predict_proba") and len(present) >= 2:
             try:
-                y_proba = model.predict_proba(X)[:, 1]
-                metrics['roc_auc'] = float(roc_auc_score(y_true, y_proba))
-                metrics['average_precision'] = float(average_precision_score(y_true, y_proba))
-                metrics['log_loss'] = float(log_loss(y_true, y_proba))
-            except:
+                proba = np.asarray(model.predict_proba(X), dtype=float)
+                labels = list(range(proba.shape[1]))
+                if n_classes == 2:
+                    metrics["roc_auc"] = float(roc_auc_score(y_true, proba[:, 1]))
+                    metrics["average_precision"] = float(average_precision_score(y_true, proba[:, 1]))
+                elif len(present) == proba.shape[1]:
+                    metrics["roc_auc_ovr"] = float(roc_auc_score(y_true, proba, multi_class="ovr"))
+                metrics["log_loss"] = float(log_loss(y_true, np.clip(proba, 1e-15, 1.0), labels=labels))
+            except Exception:
                 pass
-        
-        # Matthews correlation for binary
-        if n_classes == 2:
-            try:
-                metrics['mcc'] = float(matthews_corrcoef(y_true, y_pred))
-            except:
-                pass
-        
+        if n_classes == 2 and len(present) >= 2:
+            metrics["mcc"] = float(matthews_corrcoef(y_true, y_pred))
         return metrics
-    
-    def _regression_metrics(
-        self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray
-    ) -> Dict[str, float]:
-        """Calculate comprehensive regression metrics."""
-        # Handle potential issues
-        y_true = np.array(y_true).flatten()
-        y_pred = np.array(y_pred).flatten()
-        
+
+    def _regression_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+        y_true = np.asarray(y_true, dtype=float).ravel()
+        y_pred = np.asarray(y_pred, dtype=float).ravel()
         metrics = {
-            'r2': float(r2_score(y_true, y_pred)),
-            'mae': float(mean_absolute_error(y_true, y_pred)),
-            'mse': float(mean_squared_error(y_true, y_pred)),
-            'rmse': float(np.sqrt(mean_squared_error(y_true, y_pred))),
-            'explained_variance': float(explained_variance_score(y_true, y_pred)),
-            'max_error': float(max_error(y_true, y_pred)),
-            'median_ae': float(median_absolute_error(y_true, y_pred))
+            "mae": float(mean_absolute_error(y_true, y_pred)),
+            "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+            "median_ae": float(median_absolute_error(y_true, y_pred)),
+            "max_error": float(max_error(y_true, y_pred)),
         }
-        
-        # MAPE (handle zeros)
+        if len(y_true) >= 2 and float(np.var(y_true)) > 0:
+            metrics["r2"] = float(r2_score(y_true, y_pred))
+            metrics["explained_variance"] = float(explained_variance_score(y_true, y_pred))
+        if (y_true != 0).all():
+            metrics["mape"] = float(mean_absolute_percentage_error(y_true, y_pred))
+        return metrics
+
+    def _permutation_importance(
+        self, pipe: Pipeline, X_test: pd.DataFrame, y_test: np.ndarray, scoring: str
+    ) -> Tuple[Dict[str, float], Optional[str]]:
+        """Drop in the selection metric when each input column is shuffled."""
+        if len(X_test) < 10:
+            return {}, "Feature importance was skipped because the held-out split has fewer than 10 rows."
+        if len(X_test) > 2000:
+            idx = np.random.default_rng(self.random_state).choice(len(X_test), 2000, replace=False)
+            X_eval, y_eval = X_test.iloc[np.sort(idx)], y_test[np.sort(idx)]
+        else:
+            X_eval, y_eval = X_test, y_test
+        metric = scoring
+        if self._task in _CLASSIFICATION_TASKS and len(np.unique(y_eval)) < 2:
+            metric = "accuracy"
         try:
-            if (y_true != 0).all():
-                metrics['mape'] = float(mean_absolute_percentage_error(y_true, y_pred))
-            else:
-                # Use SMAPE for data with zeros
-                denominator = (np.abs(y_true) + np.abs(y_pred)) / 2
-                denominator = np.where(denominator == 0, 1, denominator)
-                metrics['smape'] = float(np.mean(np.abs(y_true - y_pred) / denominator))
-        except:
-            pass
-        
-        return metrics
-    
-    def _get_feature_importance(
-        self,
-        model: BaseEstimator,
-        feature_names: List[str]
-    ) -> Dict[str, float]:
-        """Extract feature importance from model."""
-        importance = {}
-        
-        if hasattr(model, 'feature_importances_'):
-            imp = model.feature_importances_
-            importance = dict(zip(feature_names, imp.tolist()))
-        elif hasattr(model, 'coef_'):
-            coef = np.abs(model.coef_).flatten()
-            if len(coef) == len(feature_names):
-                importance = dict(zip(feature_names, coef.tolist()))
-        
-        # Normalize
-        if importance:
-            max_imp = max(importance.values()) or 1
-            importance = {k: v / max_imp for k, v in importance.items()}
-        
-        return importance
-    
-    def predict(
-        self,
-        df: pd.DataFrame,
-        model_name: Optional[str] = None
-    ) -> np.ndarray:
-        """Make predictions using trained model."""
-        if model_name is None:
-            model_name = self._best_model_name
-        
-        if model_name is None or model_name not in self._trained_models:
-            raise MLException("No trained model available for prediction")
-        
-        model, _ = self._trained_models[model_name]
-        
-        if self._preprocessor is None:
-            raise MLException("Preprocessor not available")
-        
-        # Preprocess new data
-        X = self._preprocessor.transform(df)
-        
-        return model.predict(X)
-    
-    def get_best_model(self) -> Tuple[str, BaseEstimator, ModelTrainingResult]:
-        """Get the best performing model."""
-        if self._best_model_name is None:
-            raise MLException("No models have been trained")
-        
-        model, result = self._trained_models[self._best_model_name]
-        return self._best_model_name, model, result
-    
-    def compare_models(
-        self,
-        results: List[ModelTrainingResult]
-    ) -> Dict[str, Any]:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                imp = permutation_importance(
+                    pipe, X_eval, y_eval, scoring=metric, n_repeats=5,
+                    random_state=self.random_state, n_jobs=self.n_jobs,
+                )
+        except Exception as e:
+            return {}, f"Feature importance could not be computed: {e}"
+        scores = {str(c): float(v) for c, v in zip(X_eval.columns, imp.importances_mean)}
+        return dict(sorted(scores.items(), key=lambda kv: -kv[1])), None
+
+    def compare_models(self, results: List[ModelTrainingResult]) -> Dict[str, Any]:
         """Compare multiple trained models."""
         successful = [r for r in results if r.status == ModelStatus.COMPLETED]
-        
         if not successful:
             return {"error": "No successful models to compare", "models": []}
-        
-        comparison = {
+
+        def fmt(v: Optional[float]) -> str:
+            return "n/a" if v is None else f"{v:.4f}"
+
+        comparison: Dict[str, Any] = {
             "n_models": len(successful),
-            "best_model": successful[0].model_name if successful else None,
-            "summary": [],
-            "recommendation": ""
+            "best_model": successful[0].model_name,
+            "summary": [
+                {
+                    "name": r.model_name,
+                    "display_name": r.display_name,
+                    "cv_mean": r.cv_mean,
+                    "cv_std": r.cv_std,
+                    "test_metrics": {k: _round_or_none(v) for k, v in r.test_metrics.items()},
+                    "training_time_sec": round(r.training_time_sec, 2),
+                }
+                for r in successful
+            ],
+            "baseline": self.training_report.get("baseline"),
+            "beats_baseline": self.training_report.get("beats_baseline"),
         }
-        
-        for r in successful:
-            summary = {
-                "name": r.model_name,
-                "display_name": r.display_name,
-                "cv_mean": r.cv_mean,
-                "cv_std": r.cv_std,
-                "test_metrics": {k: round(v, 4) for k, v in r.test_metrics.items()},
-                "training_time_sec": round(r.training_time_sec, 2)
-            }
-            comparison["summary"].append(summary)
-        
-        if successful:
-            best = successful[0]
-            if len(successful) > 1:
-                runner_up = successful[1]
-                comparison["recommendation"] = (
-                    f"Best: {best.display_name} (CV={best.cv_mean:.4f}). "
-                    f"Consider {runner_up.display_name} as alternative."
-                )
-            else:
-                comparison["recommendation"] = f"Best: {best.display_name} (CV={best.cv_mean:.4f})"
-        
+        best = successful[0]
+        if len(successful) > 1:
+            comparison["recommendation"] = (
+                f"Best: {best.display_name} (CV={fmt(best.cv_mean)}). "
+                f"Consider {successful[1].display_name} as alternative."
+            )
+        else:
+            comparison["recommendation"] = f"Best: {best.display_name} (CV={fmt(best.cv_mean)})"
         return comparison
 
 

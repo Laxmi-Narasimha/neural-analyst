@@ -9,40 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging import LogContext, get_logger
 from app.core.serialization import to_jsonable
-from app.ml.auto_ml_engine import (
-    AdvancedAutoMLEngine,
-    MLTask,
-    ModelTrainingResult,
-    OptimizationStrategy,
-)
-from app.ml.model_registry import get_model_registry
+from app.ml.auto_ml_engine import OptimizationStrategy
+from app.ml.training_run import run_training
 from app.services.dataset_loader import DatasetLoaderService
 from app.services.job_service import JobService
 from app.services.ml_dataset_sampler import aload_representative_sample
 from app.services.ml_task_inference import infer_target_candidates
 
 logger = get_logger(__name__)
-
-
-def _map_task(task: str | None) -> MLTask | None:
-    if not task:
-        return None
-    t = str(task).strip().lower()
-    if t in {"classification", "binary_classification", "multiclass_classification"}:
-        return MLTask.BINARY_CLASSIFICATION
-    if t == "regression":
-        return MLTask.REGRESSION
-    return None
-
-
-def _serialize_training_results(results: list[ModelTrainingResult]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for r in results:
-        try:
-            out.append(r.to_dict())
-        except Exception:
-            out.append({"model_name": getattr(r, "model_name", ""), "status": str(getattr(r, "status", ""))})
-    return out
 
 
 class MLTrainingService:
@@ -76,7 +50,7 @@ class MLTrainingService:
         )
 
         df, sampling_meta = await aload_representative_sample(
-            local_path,
+            file_path=local_path,
             filename=str(record.original_filename or "dataset"),
             file_format=str(record.file_format or ""),
             sample_rows=int(sample_rows),
@@ -103,6 +77,8 @@ class MLTrainingService:
         optimize: bool = True,
         max_models: int | None = None,
         sample_rows: int | None = None,
+        time_column: str | None = None,
+        split: str | None = None,
     ) -> dict[str, Any]:
         context = LogContext(component="MLTrainingService", operation="run_baseline_training")
         sample_rows = int(sample_rows or settings.ml.chat_training_sample_rows)
@@ -115,54 +91,31 @@ class MLTrainingService:
         if target_column not in df.columns:
             raise ValueError(f"Target column '{target_column}' not found in dataset sample")
 
-        ml_task = _map_task(task)
         trials = int(settings.ml.baseline_optimization_trials) if optimize else 0
-        strategy = OptimizationStrategy.BAYESIAN if optimize and trials > 0 else OptimizationStrategy.NONE
-
-        engine = AdvancedAutoMLEngine(
-            optimization_strategy=strategy,
-            optimization_trials=max(5, trials),
-            optimization_timeout=min(600, int(settings.ml.automl_time_budget)),
-            verbose=False,
-        )
-
-        results = engine.auto_train(
+        run = run_training(
             df,
             target_column=target_column,
-            task=ml_task,
+            registered_name=f"ds_{str(dataset_id)[:8]}_{target_column}",
+            task=task,
             optimize=optimize and trials > 0,
             max_models=max_models,
-        )
-
-        registered_name = f"ds_{str(dataset_id)[:8]}_{target_column}"
-        best_name, best_model, best_result = engine.get_best_model()
-        registry = get_model_registry()
-        version = registry.register_model(
-            name=registered_name,
-            model=best_model,
-            metrics=best_result.test_metrics,
-            params={
-                "target_column": target_column,
-                "task": best_result.task.value,
-                "best_model_name": best_name,
-                "best_params": best_result.best_params,
-                "sampling": sampling_meta,
-            },
+            optimization_trials=max(5, trials),
+            optimization_timeout=min(600, int(settings.ml.automl_time_budget)),
+            time_column=time_column,
+            split=split,
             description=f"Baseline training on {target_column}",
-            tags={"dataset_id": str(dataset_id), "mode": "baseline"},
+            tags={"dataset_id": str(dataset_id), "dataset_version": version_hash, "mode": "baseline"},
+            extra_params={"sampling": sampling_meta},
+            random_state=int(settings.ml.default_random_state),
         )
-
-        payload = {
+        summary = run.summary()
+        payload = to_jsonable({
             "dataset_id": str(dataset_id),
             "dataset_version": version_hash,
-            "target_column": target_column,
-            "task": best_result.task.value,
             "sampling": sampling_meta,
-            "registered_model": registered_name,
-            "registered_version": int(version.version),
-            "best_model": best_name,
-            "models": _serialize_training_results(results),
-        }
+            **summary,
+        })
+        best_name = summary["best_model"]
         logger.info("Baseline ML training complete", context=context, dataset_id=str(dataset_id), model=best_name)
         return payload
 
@@ -177,6 +130,8 @@ class MLTrainingService:
         sample_rows: int | None = None,
         max_models: int | None = None,
         optimize: bool = True,
+        time_column: str | None = None,
+        split: str | None = None,
     ) -> None:
         context = LogContext(component="MLTrainingService", operation="run_automl_job")
         sample_rows = int(sample_rows or settings.ml.automl_training_sample_rows)
@@ -195,57 +150,37 @@ class MLTrainingService:
 
             await self._jobs.update_progress(job_id, owner_id=owner_id, progress=0.15, message="Preprocessing features")
 
-            ml_task = _map_task(task)
             trials = int(settings.ml.automl_optimization_trials) if optimize else 0
             strategy = OptimizationStrategy.BAYESIAN if optimize and trials > 0 else OptimizationStrategy.RANDOM_SEARCH
 
-            engine = AdvancedAutoMLEngine(
+            await self._jobs.update_progress(job_id, owner_id=owner_id, progress=0.25, message="Training and tuning models")
+
+            run = run_training(
+                df,
+                target_column=target_column,
+                registered_name=f"ds_{str(dataset_id)[:8]}_{target_column}_automl",
+                task=task,
+                optimize=optimize,
+                max_models=max_models,
                 optimization_strategy=strategy,
                 optimization_trials=max(10, trials),
                 optimization_timeout=int(settings.ml.automl_time_budget),
-                verbose=False,
-            )
-
-            await self._jobs.update_progress(job_id, owner_id=owner_id, progress=0.25, message="Training and tuning models")
-
-            results = engine.auto_train(
-                df,
-                target_column=target_column,
-                task=ml_task,
-                optimize=optimize,
-                max_models=max_models,
-            )
-
-            await self._jobs.update_progress(job_id, owner_id=owner_id, progress=0.85, message="Registering best model")
-
-            registered_name = f"ds_{str(dataset_id)[:8]}_{target_column}_automl"
-            best_name, best_model, best_result = engine.get_best_model()
-            registry = get_model_registry()
-            version = registry.register_model(
-                name=registered_name,
-                model=best_model,
-                metrics=best_result.test_metrics,
-                params={
-                    "target_column": target_column,
-                    "task": best_result.task.value,
-                    "best_model_name": best_name,
-                    "best_params": best_result.best_params,
-                    "sampling": sampling_meta,
-                },
+                time_column=time_column,
+                split=split,
                 description=f"AutoML training on {target_column}",
-                tags={"dataset_id": str(dataset_id), "mode": "automl"},
+                tags={"dataset_id": str(dataset_id), "dataset_version": version_hash, "mode": "automl"},
+                extra_params={"sampling": sampling_meta},
+                random_state=int(settings.ml.default_random_state),
             )
 
+            await self._jobs.update_progress(job_id, owner_id=owner_id, progress=0.95, message="Model registered")
+            summary = run.summary()
+            best_name = summary["best_model"]
             result_payload = to_jsonable({
                 "dataset_id": str(dataset_id),
                 "dataset_version": version_hash,
-                "target_column": target_column,
-                "task": best_result.task.value,
                 "sampling": sampling_meta,
-                "registered_model": registered_name,
-                "registered_version": int(version.version),
-                "best_model": best_name,
-                "models": _serialize_training_results(results),
+                **summary,
             })
 
             await self._jobs.set_completed(
