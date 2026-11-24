@@ -22,6 +22,10 @@ os.environ.setdefault("LLM_PLANNER", "off")
 os.environ["OPENAI_API_KEY"] = ""
 os.environ["LLM_MODEL"] = "ollama/offline-test-model"
 os.environ.pop("LLM_PLANNER_MODEL", None)
+# Trained models go to a throwaway folder, never into the working tree's model_registry/.
+import tempfile as _tempfile
+
+os.environ["MODEL_REGISTRY_PATH"] = _tempfile.mkdtemp(prefix="na-test-registry-")
 
 
 # =============================================================================

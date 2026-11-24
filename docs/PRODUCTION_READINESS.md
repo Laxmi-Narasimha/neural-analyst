@@ -76,7 +76,7 @@ Last updated: 2026-11-24 (branch `feature/talk-to-data-scope-and-ml-trust`).
 | D11 | Explaining a single prediction | Gap | `/ml/explain` returns global importance only for bundled models |
 | D12 | Async AutoML jobs honour `time_column` / `split` overrides | Gap | Sync path does; job payload doesn't carry them |
 | D13 | Deep learning / NLP beyond TF-IDF | Gap by design | Only where it beats tabular baselines on real tasks; keep optional |
-| D14 | Pickle loading of model artifacts | Partial | Only service-written files are loaded; signing artifacts recommended before multi-tenant hosting |
+| D14 | Pickle loading of model artifacts | Partial | Only files inside the owner's own registry folder are loaded (a tampered entry pointing elsewhere is refused, `test_tenant_isolation.py`); signing artifacts still recommended |
 
 ## E. Language-model layer
 
@@ -89,9 +89,31 @@ Last updated: 2026-11-24 (branch `feature/talk-to-data-scope-and-ml-trust`).
 | E5 | Model choice | Verified | Chosen from the eval (results below). `OPENAI_*` settings now read `.env`; before this fix a key placed in `.env` was silently ignored |
 | E6 | What the user is told the system did | Verified | "Interpreted your question as" is written by code from the validated plan, never in the model's words |
 
-## F. Security and multi-tenancy — Unreviewed in this pass
+## F. Security and multi-tenancy
 
-Auth and ownership scoping on every dataset/artifact/model route, upload size limits, SQL operator safety (`sql_safety` exists), rate limiting, model registry isolation per owner (registry folder is currently shared — **Gap**), secrets handling.
+Audited 2026-11-24: every route in `app/api/routes/` read for auth, owner scoping (followed into the
+services' WHERE clauses), file access built from input, and cross-tenant actions. Each fix below has
+a test in `tests/test_tenant_isolation.py` that reproduces the attack.
+
+| # | Use case / failure mode | Status | Evidence / next step |
+|---|---|---|---|
+| F1 | One user lists, loads, scores with or promotes another user's model | Verified | Registry is one folder per owner (`get_model_registry(owner_id)`); another owner's model is a 404 on every `/ml` route. Was: one shared folder for everyone |
+| F2 | A column header such as `../../x` chooses where a model is written | Verified | Folder names are sanitised and hashed; artifact paths must resolve inside the registry |
+| F3 | Two trainings finish at once and one version is lost or overwritten | Verified | File lock + reload before every registry write; 8 concurrent writers give versions 1–8 |
+| F4 | Models in the old shared folder | Verified | Moved to the owner of their dataset at start-up (idempotent); models whose dataset is gone stay in the old folder, which nothing serves |
+| F5 | Dataset SQL reads other files on the server (other users' uploads, `.env`, the platform database) | Verified | **Was exploitable** (`glob`, `read_text` passed the pattern check). Now the query runs on a read-only copy of the dataset with DuckDB external access off and settings locked. First query of a dataset version builds the copy (disk + time); purge deletes it |
+| F6 | A saved connection opens the platform's own database or internal hosts (cloud metadata, LAN) | Verified | **Was exploitable** (sqlite connector pointed at `dev.db`). Platform database always refused; with sign-in, private/loopback/link-local hosts refused unless `CONNECTIONS_ALLOW_PRIVATE_HOSTS=true` and SQLite only under `CONNECTIONS_SQLITE_ROOT`. Checked on save and before every use. Residual: DNS can change between the check and the connect (pin the resolved IP to close it) |
+| F7 | Production or SaaS server started without sign-in (everyone is the same superuser) | Verified | Start-up refuses unless `AUTH_MODE=jwt` |
+| F8 | Any analyst deletes every tenant's unreferenced files via storage GC or clears the shared cache | Verified | Maintenance routes are admin-only |
+| F9 | API keys with more rights than their creator, or revoked by another user | Verified | Requested permissions must be held by the caller; revoke checks the owner. Gap: keys are in memory and not yet usable for sign-in |
+| F10 | Public report links | Verified | 256-bit tokens stored hashed; expiry and revocation enforced; now also stop working when the owner's account is deactivated or deleted |
+| F11 | Replayed billing webhooks; checkout return URL sends users to another site | Verified | 5-minute signature window; return URLs must be on `frontend_url` |
+| F12 | Owner scoping on dataset, analysis, artifact, chat, job, connection, share, quality and dashboard routes | Partial | Verified by code audit (all scoped); cross-user tests exist for ML, SQL, connections, maintenance and keys only. Add a two-user test per router |
+| F13 | Deleting a dataset leaves derived copies | Verified | Purge also deletes models trained on it and its SQL copy |
+| F14 | Responses reveal server file paths | Partial | Removed from analysis export and artifact manifest responses; no test |
+| F15 | Global metrics visible to every tenant | Verified | Process-wide counters only for admins |
+| F16 | Signing secret exposure | Action | Any deployment that ran the old dataset SQL code could have had `.env` read: rotate `SECURITY_SECRET_KEY` and connection encryption keys there |
+| F17 | Upload size limits, rate limiting per user, secrets at rest | Unreviewed | |
 
 ## G. Operations — Unreviewed in this pass
 
@@ -137,6 +159,6 @@ arbitrary formulas over 3+ columns, and real user phrasing collected from produc
 1. ~~**B4** LLM-proposed filters as validated conditions~~: done.
 2. ~~**B12** Real-model evaluation set and scorer~~: done. Rerun it on every planner change.
 3. ~~**B7/B8** Derived metrics and period-over-period with contribution~~: done.
-4. **F** Per-owner model registry and an ownership audit of all routes.
+4. ~~**F** Per-owner model registry and an ownership audit of all routes~~: done (F12 tests per router still to add).
 5. **D6–D10** Imbalance handling, calibration, segment error analysis, explicit prediction moment, batch scoring with drift.
 6. **A4–A6** Encoding/locale/header detection fixtures.

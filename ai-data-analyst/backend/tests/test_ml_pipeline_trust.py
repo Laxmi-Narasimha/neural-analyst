@@ -28,7 +28,9 @@ import pytest_asyncio
 pytest.importorskip("sklearn")
 
 from app.ml.auto_ml_engine import AdvancedAutoMLEngine, MLTask, OptimizationStrategy
-from app.ml.model_registry import ModelRegistry
+from app.ml.model_registry import ModelRegistry, get_model_registry
+
+OWNER = UUID("00000000-0000-0000-0000-00000000beef")
 from app.ml.tabular_pipeline import ModelBundle, TabularPreprocessor
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -304,6 +306,7 @@ def test_chat_training_operator_reports_evaluation_and_registers_a_bundle(regist
         df=df,
         profile_report={"row_count": len(df), "column_count": len(df.columns)},
         schema_info={"columns": [{"name": c, "inferred_type": str(df[c].dtype)} for c in df.columns]},
+        owner_id=OWNER,
     )
     result = MLTrainBaselineOperator().run(ctx, {"target_column": "late", "optimize": False, "max_models": 2})
     s = result.summary
@@ -315,7 +318,7 @@ def test_chat_training_operator_reports_evaluation_and_registers_a_bundle(regist
     assert table["cv_mean"].notna().all()
     json.dumps(s)  # the summary must be JSON-safe for storage and the API
 
-    loaded = ModelRegistry(registry_dir).load_model(s["registered_model"], version=s["registered_version"])
+    loaded = get_model_registry(OWNER).load_model(s["registered_model"], version=s["registered_version"])
     assert isinstance(loaded, ModelBundle)
     assert loaded.predict(df.drop(columns=["late"]).head(5))[0] in {"late", "on_time"}
 

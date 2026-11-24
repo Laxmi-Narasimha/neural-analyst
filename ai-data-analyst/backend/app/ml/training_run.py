@@ -110,6 +110,7 @@ def run_training(
     *,
     target_column: str,
     registered_name: str,
+    owner_id: Any,
     task: Optional[str] = None,
     optimize: bool = False,
     max_models: int = 4,
@@ -124,6 +125,8 @@ def run_training(
     extra_params: Optional[dict[str, Any]] = None,
     random_state: int = 42,
 ) -> TrainingRun:
+    if owner_id is None:
+        raise ValueError("Training needs a signed-in owner to keep the model under")
     if target_column not in df.columns:
         raise ValueError(f"Target column '{target_column}' not found")
     df, target_column, time_column, exclude_columns, _ = AdvancedAutoMLEngine._normalise_frame(
@@ -157,7 +160,7 @@ def run_training(
     metrics = {k: v for k, v in best.test_metrics.items()}
     if best.cv_mean is not None:
         metrics[f"cv_{best.cv_scoring}"] = best.cv_mean
-    registry = get_model_registry()
+    registry = get_model_registry(owner_id)
     version = registry.register_model(
         name=registered_name,
         model=bundle,

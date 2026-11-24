@@ -148,6 +148,20 @@ class DatasetPurgeService:
                     obj.prune_cache()
                 except Exception:
                     pass
+                # The SQL sandbox keeps a full copy of the data, and models can memorise rows.
+                try:
+                    from app.services.dataset_sql import prune_orphans
+
+                    prune_orphans()
+                except Exception as e:
+                    logger.warning("Could not prune SQL copies after purge", context=context, error=str(e))
+                if owner_id is not None:
+                    try:
+                        from app.ml.model_registry import get_model_registry
+
+                        get_model_registry(owner_id).delete_models_for_dataset(dataset_id)
+                    except Exception as e:
+                        failed.append({"path": "trained models", "error": str(e)})
 
                 if failed:
                     if job is not None:

@@ -86,6 +86,7 @@ class MLTrainBaselineOperator:
             ctx.df,
             target_column=target,
             registered_name=f"ds_{str(ctx.dataset_id)[:8]}_{target}",
+            owner_id=ctx.owner_id,
             task=params.get("task"),
             optimize=optimize and trials > 0,
             max_models=max_models,

@@ -8,11 +8,16 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional, Callable
-from uuid import uuid4
+from uuid import UUID, uuid4
 import json
 import os
 import pickle
 import hashlib
+import re
+import shutil
+import time
+
+from filelock import FileLock
 
 import numpy as np
 import pandas as pd
@@ -26,6 +31,27 @@ except ImportError:
 logger = get_logger(__name__)
 
 _REGISTRY_FORMAT = 2
+_OWNERS_DIR = "owners"
+_UNSAFE_DIR_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+_LOCK_TIMEOUT_SECONDS = 60
+
+
+def model_dir_name(name: str) -> str:
+    """Folder for a model name. Names come from column headers in uploaded files, so they may hold
+    path separators, '..', reserved device names or non-ASCII text; the folder is always a plain
+    ASCII name, with a hash suffix whenever the name had to change, so two names never share one."""
+    raw = str(name)
+    safe = _UNSAFE_DIR_CHARS.sub("_", raw).strip("._")[:60] or "model"
+    if safe != raw or safe.upper().split(".")[0] in {"CON", "PRN", "AUX", "NUL", "COM1", "LPT1"}:
+        safe = f"{safe}-{hashlib.sha1(raw.encode('utf-8')).hexdigest()[:10]}"
+    return safe
+
+
+def validate_model_name(name: Any) -> str:
+    text = str(name or "").strip()
+    if not text or len(text) > 200 or any(ord(ch) < 32 for ch in text):
+        raise ValidationException("Model names must be 1-200 printable characters")
+    return text
 
 
 def _round_metric(value: Any) -> Any:
@@ -244,7 +270,15 @@ class ModelRegistry:
 
         self._models: dict[str, RegisteredModel] = {}
         self._experiments: dict[str, Experiment] = {}
+        # Every change is read-modify-write of registry.json under this lock, so two trainings
+        # finishing together (threads, workers or processes) never lose a version or reuse a folder.
+        self._lock = FileLock(str(self._storage_path / "registry.lock"), timeout=_LOCK_TIMEOUT_SECONDS)
 
+        self._load_registry()
+
+    def _reload(self) -> None:
+        self._models = {}
+        self._experiments = {}
         self._load_registry()
 
     @property
@@ -252,19 +286,30 @@ class ModelRegistry:
         return self._storage_path
 
     def _resolve_artifact(self, model_path: Optional[str]) -> Optional[Path]:
+        """Artifacts are unpickled, so only files inside this registry's own folder are ever opened."""
         if not model_path:
             return None
         p = Path(model_path)
-        if p.is_absolute():
-            return p
         # Stored relative to the registry folder; older entries were relative to the cwd.
-        candidate = self._storage_path / p
-        return candidate if candidate.exists() or not p.exists() else p
+        candidate = p if p.is_absolute() else self._storage_path / p
+        if not p.is_absolute() and not candidate.exists() and p.exists():
+            candidate = p
+        root = self._storage_path.resolve()
+        resolved = candidate.resolve()
+        if resolved != root and root not in resolved.parents:
+            raise ValidationException("Model artifact is outside this registry")
+        return resolved
 
     def _recover_versions_from_disk(self, model: RegisteredModel) -> None:
         """Rebuild versions for entries written before versions were persisted."""
-        model_dir = self._storage_path / model.name
+        model_dir = self._storage_path / model_dir_name(model.name)
         if not model_dir.is_dir():
+            model_dir = self._storage_path / model.name
+        try:
+            inside = model_dir.resolve().parent == self._storage_path.resolve()
+        except OSError:
+            inside = False
+        if not inside or not model_dir.is_dir():
             return
         for vdir in sorted(model_dir.glob("v*"), key=lambda d: d.name):
             artifact = vdir / "model.pkl"
@@ -328,7 +373,16 @@ class ModelRegistry:
         tmp = registry_file.with_suffix(f".json.{uuid4().hex}.tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
-        os.replace(tmp, registry_file)
+        # Windows refuses to replace a file another process is reading for a moment; retry briefly.
+        for attempt in range(20):
+            try:
+                os.replace(tmp, registry_file)
+                return
+            except PermissionError:
+                if attempt == 19:
+                    tmp.unlink(missing_ok=True)
+                    raise
+                time.sleep(0.05)
     
     def register_model(
         self,
@@ -340,7 +394,13 @@ class ModelRegistry:
         tags: dict[str, str] = None
     ) -> ModelVersion:
         """Register a new model or version."""
-        # Get or create registered model
+        name = validate_model_name(name)
+        payload = pickle.dumps(model)  # outside the lock: it can take a while for big models
+        with self._lock:
+            self._reload()
+            return self._register_locked(name, payload, metrics, params, description, tags)
+
+    def _register_locked(self, name, payload, metrics, params, description, tags) -> ModelVersion:
         if name not in self._models:
             self._models[name] = RegisteredModel(
                 model_id=str(uuid4()),
@@ -352,16 +412,14 @@ class ModelRegistry:
         registered = self._models[name]
         version_num = max((v.version for v in registered.versions), default=0) + 1
 
-        # Save model artifact
-        model_path = self._storage_path / name / f"v{version_num}"
+        model_path = self._storage_path / model_dir_name(name) / f"v{version_num}"
         model_path.mkdir(parents=True, exist_ok=True)
         model_file = model_path / "model.pkl"
-
-        payload = pickle.dumps(model)
-        with open(model_file, 'wb') as f:
+        tmp_file = model_path / f"model.{uuid4().hex}.tmp"
+        with open(tmp_file, 'wb') as f:
             f.write(payload)
+        os.replace(tmp_file, model_file)
 
-        # Create version
         version = ModelVersion(
             version=version_num,
             model_id=registered.model_id,
@@ -389,6 +447,11 @@ class ModelRegistry:
         stage: ModelStage
     ) -> ModelVersion:
         """Transition model version to new stage."""
+        with self._lock:
+            self._reload()
+            return self._transition_locked(name, version, stage)
+
+    def _transition_locked(self, name: str, version: int, stage: ModelStage) -> ModelVersion:
         if name not in self._models:
             raise ValidationException(f"Model {name} not found")
         
@@ -500,21 +563,38 @@ class ModelRegistry:
         metric_comparison = {}
         all_metrics = set(v1.metrics.keys()) | set(v2.metrics.keys())
         
-        for metric in all_metrics:
-            m1 = v1.metrics.get(metric, 0)
-            m2 = v2.metrics.get(metric, 0)
+        def num(value: Any) -> Optional[float]:
+            try:
+                f = float(value)
+            except (TypeError, ValueError):
+                return None
+            return f if np.isfinite(f) else None
+
+        for metric in sorted(all_metrics):
+            m1, m2 = num(v1.metrics.get(metric)), num(v2.metrics.get(metric))
+            change = None if m1 is None or m2 is None else m2 - m1
             metric_comparison[metric] = {
                 "v1": m1,
                 "v2": m2,
-                "change": m2 - m1,
-                "change_pct": ((m2 - m1) / m1 * 100) if m1 != 0 else 0
+                "change": change,
+                "change_pct": (change / abs(m1) * 100) if change is not None and m1 else None,
             }
         
+        # Cross-validated scores follow scikit-learn's convention (higher is better, errors are
+        # negated), so they are the one fair basis for a pick. Raw test metrics mix directions.
+        cv = [m for m in sorted(all_metrics) if m.startswith("cv_")
+              and metric_comparison[m]["change"] is not None]
+        recommendation = None
+        basis = None
+        if cv:
+            basis = cv[0]
+            recommendation = "v2" if metric_comparison[basis]["change"] > 0 else "v1"
         return {
             "version1": version1,
             "version2": version2,
             "metrics": metric_comparison,
-            "recommendation": "v2" if sum(v2.metrics.values()) > sum(v1.metrics.values()) else "v1"
+            "recommendation": recommendation,
+            "recommendation_basis": basis,
         }
     
     # Experiment tracking
@@ -536,30 +616,43 @@ class ModelRegistry:
         model_name: str = None
     ) -> dict[str, Any]:
         """Log experiment run."""
-        if experiment_name not in self._experiments:
-            self.create_experiment(experiment_name)
-        
-        exp = self._experiments[experiment_name]
-        
         run = {
             "run_id": str(uuid4()),
             "timestamp": datetime.utcnow().isoformat(),
             "params": params,
             "metrics": metrics
         }
-        
-        exp.runs.append(run)
-        
-        # Optionally register model
         if model and model_name:
-            version = self.register_model(
-                model_name, model, metrics, params
-            )
+            version = self.register_model(model_name, model, metrics, params)
             run["model_version"] = version.version
-        
-        self._save_registry()
+        with self._lock:
+            self._reload()
+            if experiment_name not in self._experiments:
+                self.create_experiment(experiment_name)
+            self._experiments[experiment_name].runs.append(run)
+            self._save_registry()
         return run
     
+    def delete_models_for_dataset(self, dataset_id: Any) -> list[str]:
+        """Remove every model trained on one dataset, with its files. A trained model can memorise
+        rows of its training data, so deleting a dataset must delete its models too."""
+        wanted = str(dataset_id)
+        removed: list[str] = []
+        with self._lock:
+            self._reload()
+            for name in [n for n, m in self._models.items() if str((m.tags or {}).get("dataset_id")) == wanted]:
+                for folder in {self._storage_path / model_dir_name(name), self._storage_path / name}:
+                    try:
+                        if folder.is_dir() and folder.resolve().parent == self._storage_path.resolve():
+                            shutil.rmtree(folder)
+                    except OSError as e:
+                        logger.warning(f"Could not delete model folder {folder.name}: {e}")
+                del self._models[name]
+                removed.append(name)
+            if removed:
+                self._save_registry()
+        return removed
+
     def get_experiment_runs(self, name: str) -> list[dict[str, Any]]:
         """Get all runs for an experiment."""
         if name not in self._experiments:
@@ -567,7 +660,82 @@ class ModelRegistry:
         return self._experiments[name].runs
 
 
-# Factory function
-def get_model_registry(path: Optional[str] = None) -> ModelRegistry:
-    """Get model registry instance (MODEL_REGISTRY_PATH overrides the default folder)."""
-    return ModelRegistry(path or os.getenv("MODEL_REGISTRY_PATH") or "./model_registry")
+def registry_root() -> Path:
+    """Top folder for every owner's registry (MODEL_REGISTRY_PATH overrides the default)."""
+    return Path(os.getenv("MODEL_REGISTRY_PATH") or "./model_registry")
+
+
+def _owner_key(owner_id: Any) -> str:
+    try:
+        return str(UUID(str(owner_id)))
+    except (TypeError, ValueError, AttributeError):
+        raise ValidationException("A model registry belongs to one signed-in owner") from None
+
+
+def get_model_registry(owner_id: Any) -> ModelRegistry:
+    """The registry of one owner. Models are never shared between owners: each owner has a
+    separate folder, so a name or version from someone else simply does not exist here."""
+    if owner_id is None:
+        raise ValidationException("A model registry belongs to one signed-in owner")
+    return ModelRegistry(registry_root() / _OWNERS_DIR / _owner_key(owner_id))
+
+
+def migrate_shared_registry(owner_of_dataset: Callable[[str], Optional[Any]]) -> dict[str, Any]:
+    """Move models from the old single shared registry into their owners' registries.
+
+    The owner is found from each model's dataset_id tag. Models whose owner cannot be found stay in
+    the old registry, which no API reads any more, so they are never served to anyone. Safe to run
+    on every start: it is idempotent and holds both registries' locks while moving a model.
+    """
+    root = registry_root()
+    report: dict[str, Any] = {"moved": [], "unclaimed": [], "conflicts": []}
+    if not (root / "registry.json").exists():
+        return report
+    legacy = ModelRegistry(root)
+    with legacy._lock:
+        legacy._reload()
+        for name in list(legacy._models):
+            model = legacy._models[name]
+            dataset_id = str((model.tags or {}).get("dataset_id") or "")
+            owner = owner_of_dataset(dataset_id) if dataset_id else None
+            if owner is None:
+                report["unclaimed"].append(name)
+                continue
+            target = get_model_registry(owner)
+            with target._lock:
+                target._reload()
+                if name in target._models:
+                    report["conflicts"].append(name)
+                    continue
+                dest_dir = target.storage_path / model_dir_name(name)
+                for v in model.versions:
+                    try:
+                        src = legacy._resolve_artifact(v.model_path)
+                    except ValidationException:
+                        src = None
+                    if src is None or not src.exists():
+                        continue
+                    dest = dest_dir / f"v{v.version}" / "model.pkl"
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+                    v.model_path = str(dest.relative_to(target.storage_path))
+                model.versions = [v for v in model.versions
+                                  if v.model_path and (target.storage_path / v.model_path).exists()]
+                target._models[name] = model
+                target._save_registry()
+            del legacy._models[name]
+            legacy._save_registry()
+            for folder in {root / model_dir_name(name), root / name}:
+                try:
+                    if folder.is_dir() and folder.resolve().parent == root.resolve():
+                        shutil.rmtree(folder, ignore_errors=True)
+                except OSError:
+                    pass
+            report["moved"].append(name)
+    if report["moved"] or report["unclaimed"] or report["conflicts"]:
+        logger.info(
+            "Shared model registry migration",
+            moved=len(report["moved"]), unclaimed=len(report["unclaimed"]),
+            conflicts=len(report["conflicts"]),
+        )
+    return report

@@ -221,6 +221,7 @@ class ComputeExecutor:
             schema_info=loaded.schema_info,
             source_file_path=str(loaded.file_path or "") or None,
             source_file_format=str(loaded.file_format or "") or None,
+            owner_id=owner_id,
         )
 
         def _run_sync():

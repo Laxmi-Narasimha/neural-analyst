@@ -27,6 +27,31 @@ logger = get_logger(__name__)
 router = APIRouter()
 
 
+async def _require_owned_dataset(db: AsyncSession, dataset_id: UUID, user: AuthUser) -> None:
+    """Refuse before queueing anything: a job must never reference another owner's dataset."""
+    from app.services.dataset_loader import DatasetLoaderService
+
+    await DatasetLoaderService(db).get_dataset_record(dataset_id, owner_id=user.user_id, require_ready=True)
+
+
+def _registry(user: AuthUser):
+    """The caller's own registry. Another owner's model names and versions do not exist in it,
+    so every lookup below is a 404 for them rather than a permission error that leaks existence."""
+    from app.ml.model_registry import get_model_registry
+
+    return get_model_registry(user.user_id)
+
+
+def _load_owned_model(user: AuthUser, name: str, version: Optional[int] = None):
+    registry = _registry(user)
+    if name not in {m["name"] for m in registry.list_models()}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")
+    try:
+        return registry.load_model(name, version=version)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+
+
 class TrainModelRequest(BaseModel):
     dataset_id: str
     target_column: str
@@ -147,6 +172,7 @@ async def train_model(
     service = MLTrainingService(db)
     subscription = SubscriptionService(db)
     await subscription.assert_can_run(user.user_id, action=UsageAction.ML_TRAIN)
+    await _require_owned_dataset(db, dataset_id, user)
 
     if mode in {"automl", "full", "async"}:
         jobs = JobService(db)
@@ -221,6 +247,7 @@ async def run_automl(
 
     jobs = JobService(db)
     await SubscriptionService(db).assert_can_run(user.user_id, action=UsageAction.ML_TRAIN)
+    await _require_owned_dataset(db, dataset_id, user)
     job = await jobs.create(
         owner_id=user.user_id,
         job_type=JobType.ML_TRAINING,
@@ -266,15 +293,13 @@ async def predict(
     """Make predictions using a trained model."""
     try:
         import pandas as pd
-        from app.ml.model_registry import get_model_registry
 
         from app.ml.model_registry import _jsonable
         from app.ml.tabular_pipeline import ModelBundle
 
         if not request.data:
             raise ValueError("Provide at least one row in 'data'")
-        registry = get_model_registry()
-        model = registry.load_model(request.model_name, version=request.model_version)
+        model = _load_owned_model(user, request.model_name, request.model_version)
         df = pd.DataFrame(request.data)
         if isinstance(model, ModelBundle):
             warnings = model.check_input(df)
@@ -298,6 +323,8 @@ async def predict(
             model_version=request.model_version,
             warnings=["This model was saved without its preprocessing; retrain it to score raw rows."],
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -315,12 +342,10 @@ async def explain_model(
     try:
         import pandas as pd
         from app.ml.explainability import get_explainability_engine
-        from app.ml.model_registry import get_model_registry
 
         from app.ml.tabular_pipeline import ModelBundle
 
-        registry = get_model_registry()
-        model = registry.load_model(request.model_name)
+        model = _load_owned_model(user, request.model_name)
         if isinstance(model, ModelBundle):
             # Per-row SHAP over the full preprocessing pipeline is not implemented yet;
             # return the held-out permutation importance recorded at training time.
@@ -340,6 +365,8 @@ async def explain_model(
             return {"method": "shap", "explanations": [r.to_dict() for r in result]}
         global_exp = explainer.explain_model(model, df)
         return {"method": "global", "explanation": global_exp.to_dict()}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Explanation error: {e}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -347,19 +374,13 @@ async def explain_model(
 
 @router.get("/models", response_model=ModelListResponse)
 async def list_models(user: AuthUser = Depends(get_current_user)):
-    from app.ml.model_registry import get_model_registry
-
-    registry = get_model_registry()
-    models = registry.list_models()
+    models = _registry(user).list_models()
     return ModelListResponse(models=models, total=len(models))
 
 
 @router.get("/models/{model_name}")
 async def get_model(model_name: str, user: AuthUser = Depends(get_current_user)):
-    from app.ml.model_registry import get_model_registry
-
-    registry = get_model_registry()
-    versions = registry.get_model_versions(model_name)
+    versions = _registry(user).get_model_versions(model_name)
     if not versions:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")
     return {"model_name": model_name, "versions": versions}
@@ -372,15 +393,21 @@ async def promote_model(
     stage: str = "production",
     user: AuthUser = Depends(require_permission(Permission.MANAGE_MODELS)),
 ):
-    try:
-        from app.ml.model_registry import ModelStage, get_model_registry
+    from app.ml.model_registry import ModelStage
 
-        registry = get_model_registry()
+    try:
         model_stage = ModelStage(stage)
+    except ValueError:
+        allowed = ", ".join(s.value for s in ModelStage)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"stage must be one of: {allowed}")
+    registry = _registry(user)
+    if not registry.get_model_versions(model_name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")
+    try:
         registry.transition_stage(model_name, version, model_stage)
-        return {"status": "success", "model_name": model_name, "version": version, "stage": stage}
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    return {"status": "success", "model_name": model_name, "version": version, "stage": stage}
 
 
 @router.post("/models/{model_name}/compare")
@@ -390,13 +417,13 @@ async def compare_model_versions(
     version2: int,
     user: AuthUser = Depends(get_current_user),
 ):
-    from app.ml.model_registry import get_model_registry
-
-    registry = get_model_registry()
+    registry = _registry(user)
+    if not registry.get_model_versions(model_name):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")
     try:
         return registry.compare_versions(model_name, version1, version2)
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
 
 
 @router.get("/jobs/{job_id}")

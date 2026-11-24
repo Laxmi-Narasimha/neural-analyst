@@ -13,6 +13,7 @@ def _ctx(df: pd.DataFrame) -> OperatorContext:
         df=df,
         profile_report={"row_count": len(df), "column_count": len(df.columns)},
         schema_info={"columns": [{"name": c, "inferred_type": str(df[c].dtype)} for c in df.columns]},
+        owner_id=UUID("00000000-0000-0000-0000-00000000beef"),
     )
 
 

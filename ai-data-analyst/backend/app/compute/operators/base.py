@@ -16,6 +16,8 @@ class OperatorContext:
     schema_info: dict[str, Any]
     source_file_path: str | None = None
     source_file_format: str | None = None
+    # The signed-in owner the operator runs for; operators that persist anything (models) need it.
+    owner_id: UUID | None = None
 
 
 @dataclass(frozen=True)

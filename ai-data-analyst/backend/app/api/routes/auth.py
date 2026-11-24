@@ -345,7 +345,17 @@ async def create_api_key(
     """Create a new API key."""
     permissions = None
     if request.permissions:
-        permissions = [Permission(p) for p in request.permissions]
+        try:
+            permissions = [Permission(p) for p in request.permissions]
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown permission")
+        held = set(user.permissions or [])
+        extra = [p.value for p in permissions if p not in held]
+        if extra:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"A key cannot have permissions you do not have: {', '.join(extra)}",
+            )
 
     key_id, secret = auth_service.api_keys.generate_key(
         user_id=str(user.user_id),
@@ -368,7 +378,7 @@ async def revoke_api_key(
     auth_service: AuthenticationService = Depends(get_auth_service)
 ):
     """Revoke an API key."""
-    if auth_service.api_keys.revoke_key(key_id):
+    if auth_service.api_keys.revoke_key(key_id, user_id=str(user.user_id)):
         return {"status": "success", "message": "API key revoked"}
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,

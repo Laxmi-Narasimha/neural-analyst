@@ -123,7 +123,10 @@ async def get_artifact_manifest(
     if result.scalars().first() is None:
         raise HTTPException(status_code=404, detail="Artifact not found")
     store = ArtifactStore()
-    manifest = store.read_manifest(artifact_id)
+    manifest = dict(store.read_manifest(artifact_id) or {})
+    # Server file locations are not the caller's business (and help an attacker map the disk).
+    for key in ("data_path", "manifest_path", "storage_path", "file_path"):
+        manifest.pop(key, None)
     return APIResponse.success(data=manifest)
 
 

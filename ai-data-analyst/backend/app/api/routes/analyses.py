@@ -60,7 +60,6 @@ def _artifact_ref_to_dict(a: Any) -> dict[str, Any]:
         "artifact_type": atype,
         "name": getattr(a, "name", None),
         "created_at": getattr(a, "created_at", None),
-        "storage_path": getattr(a, "storage_path", None),
         "preview": getattr(a, "preview", None),
         "dataset_id": str(getattr(a, "dataset_id", None)) if getattr(a, "dataset_id", None) else None,
         "dataset_version": getattr(a, "dataset_version", None),

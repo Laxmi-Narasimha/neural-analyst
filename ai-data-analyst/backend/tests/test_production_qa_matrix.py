@@ -449,10 +449,12 @@ async def test_qa_data_speaks_jobs_artifacts_reports(qa_env):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_qa_connections_sqlite_lifecycle(qa_env):
+async def test_qa_connections_sqlite_lifecycle(qa_env, monkeypatch):
     client, headers = qa_env["client"], qa_env["headers"]
     conn_db: Path = qa_env["conn_db"]
     conn_db.write_text("SELECT 1", encoding="utf-8")
+    # With sign-in on, SQLite files are allowed only inside the configured folder.
+    monkeypatch.setattr(settings.connections, "sqlite_root", conn_db.parent)
 
     created = await client.post(
         "/api/v1/connections",

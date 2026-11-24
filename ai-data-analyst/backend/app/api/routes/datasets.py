@@ -77,34 +77,10 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _run_duckdb_query_sync(*, file_path: str, file_format: str, sql: str) -> tuple["pd.DataFrame", float]:
-    import duckdb
-    import pandas as pd
+    # Sandboxed: the query cannot read any file but this dataset (see app/services/dataset_sql.py).
+    from app.services.dataset_sql import run_dataset_sql
 
-    def _quote(value: str) -> str:
-        v = str(value or "")
-        v = v.replace("\\", "/")
-        v = v.replace("'", "''")
-        return f"'{v}'"
-
-    con = duckdb.connect(database=":memory:")
-    try:
-        fmt = str(file_format or "").lower().strip()
-        if fmt == "parquet":
-            con.execute(f"CREATE VIEW dataset AS SELECT * FROM read_parquet({_quote(file_path)})")
-        elif fmt in {"csv", "tsv"}:
-            con.execute(f"CREATE VIEW dataset AS SELECT * FROM read_csv_auto({_quote(file_path)})")
-        else:
-            raise ValueError("Dataset SQL is supported for CSV/TSV/Parquet only")
-
-        t0 = time.perf_counter()
-        df: pd.DataFrame = con.execute(str(sql)).df()
-        dur_ms = (time.perf_counter() - t0) * 1000.0
-        return df, float(dur_ms)
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
+    return run_dataset_sql(file_path=file_path, file_format=file_format, sql=sql)
 
 
 def _load_query_source_df(*, file_path: str, file_format: str) -> "pd.DataFrame":

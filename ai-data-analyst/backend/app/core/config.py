@@ -286,6 +286,17 @@ class ConnectionsConfig(BaseSettings):
     # Import guardrails (cap data pulled from external sources).
     max_import_rows: int = Field(default=200000, ge=1000, le=5000000)
 
+    # Reach of saved connections when several users share a server (AUTH_MODE=jwt).
+    # See app/services/connection_policy.py.
+    allow_private_hosts: bool = Field(
+        default=False,
+        description="Let connections reach loopback/private-network hosts (self-hosted teams only)",
+    )
+    sqlite_root: Optional[Path] = Field(
+        default=None,
+        description="Folder SQLite file connections must live in; unset turns them off",
+    )
+
 
 class OpenAIConfig(BaseSettings):
     """OpenAI API configuration."""

@@ -12,20 +12,10 @@ from app.services.sql_safety import enforce_row_limit, validate_dataset_sql
 
 
 def _duckdb_read_sql(file_path: str, file_format: str, sql: str) -> pd.DataFrame:
-    import duckdb
+    # Sandboxed: the query cannot read any file but this dataset (see app/services/dataset_sql.py).
+    from app.services.dataset_sql import run_dataset_sql
 
-    fmt = str(file_format or "").lower()
-    con = duckdb.connect(database=":memory:")
-    try:
-        if fmt in {"parquet", "pq"}:
-            con.execute(f"CREATE OR REPLACE VIEW dataset AS SELECT * FROM read_parquet('{file_path}')")
-        elif fmt in {"csv", "tsv", "txt"}:
-            con.execute(f"CREATE OR REPLACE VIEW dataset AS SELECT * FROM read_csv_auto('{file_path}')")
-        else:
-            con.execute(f"CREATE OR REPLACE VIEW dataset AS SELECT * FROM read_csv_auto('{file_path}')")
-        return con.execute(sql).fetchdf()
-    finally:
-        con.close()
+    return run_dataset_sql(file_path=file_path, file_format=file_format, sql=sql)[0]
 
 
 @dataclass(frozen=True)

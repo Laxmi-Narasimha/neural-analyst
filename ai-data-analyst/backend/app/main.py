@@ -31,7 +31,19 @@ logger = get_logger(__name__)
 
 
 def validate_startup_security() -> None:
-    """Refuse a public JWT deployment with the development signing secret."""
+    """Refuse an open or weakly signed public deployment.
+
+    Without sign-in (AUTH_MODE=local) every request is the same superuser, so a production or SaaS
+    server in that mode would let anyone read and delete everything.
+    """
+    from app.core.config import DeploymentMode
+
+    public = settings.environment == Environment.PRODUCTION or settings.deployment_mode == DeploymentMode.SAAS
+    if public and settings.auth_mode != AuthMode.JWT:
+        raise RuntimeError(
+            "Production and SaaS deployments require AUTH_MODE=jwt; AUTH_MODE=local gives every "
+            "request full access without signing in"
+        )
     if settings.environment != Environment.PRODUCTION or settings.auth_mode != AuthMode.JWT:
         return
     secret = settings.security.secret_key.get_secret_value()
@@ -65,6 +77,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Startup
         validate_startup_security()
         await init_database()
+        try:
+            from app.services.model_registry_migration import migrate_shared_model_registry
+
+            await migrate_shared_model_registry()
+        except Exception as e:  # never block start-up; the old folder is simply not served
+            logger.warning(f"Shared model registry migration skipped: {e}")
         
         # TODO: Initialize Redis
         # TODO: Initialize Celery workers

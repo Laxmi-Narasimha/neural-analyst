@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import warnings
+from uuid import UUID
 
 import pandas as pd
 import pytest
@@ -16,6 +17,8 @@ pytest.importorskip("sklearn")
 
 from app.core.exceptions import MLException
 from app.ml.model_registry import get_model_registry
+
+OWNER = UUID("00000000-0000-0000-0000-00000000beef")
 from app.ml.training_run import run_training
 from tests import ml_robustness_cases as cases
 
@@ -48,11 +51,11 @@ def test_hostile_dataset(name, tmp_path, monkeypatch):
         warnings.simplefilter("ignore")
         if expect == "refuse":
             with pytest.raises((MLException, ValueError)):
-                run_training(df, target_column=target, registered_name=f"t_{name}", max_models=2)
+                run_training(df, target_column=target, registered_name=f"t_{name}", owner_id=OWNER, max_models=2)
             return
-        run = run_training(df, target_column=target, registered_name=f"t_{name}", max_models=2)
+        run = run_training(df, target_column=target, registered_name=f"t_{name}", owner_id=OWNER, max_models=2)
         summary = run.summary()
-        bundle = get_model_registry().load_model(run.registered_name, version=run.registered_version)
+        bundle = get_model_registry(OWNER).load_model(run.registered_name, version=run.registered_version)
         raw = df.drop(columns=[target]).head(5)
         preds = bundle.predict(raw)
 

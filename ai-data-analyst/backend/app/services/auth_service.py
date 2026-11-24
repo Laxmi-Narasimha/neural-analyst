@@ -298,9 +298,9 @@ class APIKeyService:
         
         return key_data
     
-    def revoke_key(self, key_id: str) -> bool:
-        """Revoke an API key."""
-        if key_id in self._keys:
+    def revoke_key(self, key_id: str, user_id: Optional[str] = None) -> bool:
+        """Revoke an API key. With user_id, only that user's key (another user's key is 'not found')."""
+        if key_id in self._keys and (user_id is None or str(self._keys[key_id].get("user_id")) == str(user_id)):
             del self._keys[key_id]
             return True
         return False
