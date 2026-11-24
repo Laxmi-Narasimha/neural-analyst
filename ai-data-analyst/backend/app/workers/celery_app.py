@@ -55,6 +55,13 @@ def transform_dataset_task(dataset_id: str, job_id: str | None = None) -> None:
     asyncio.run(DatasetTransformService().run_transform(ds_id, j_id))
 
 
+_ML_OPTIONS = {"time_column", "split", "test_start", "balance_class_weights"}
+
+
+def _ml_options(raw: object) -> dict:
+    return {k: v for k, v in (raw or {}).items() if k in _ML_OPTIONS} if isinstance(raw, dict) else {}
+
+
 @celery_app.task(name="jobs.run_ml_training")
 def run_ml_training_task(payload: dict) -> None:
     """Run AutoML training out-of-process on a representative dataset sample."""
@@ -82,6 +89,7 @@ def run_ml_training_task(payload: dict) -> None:
                 sample_rows=int(sample_rows) if sample_rows is not None else None,
                 max_models=int(max_models) if max_models is not None else None,
                 optimize=optimize,
+                **_ml_options(payload.get("options")),
             )
 
     asyncio.run(_run())

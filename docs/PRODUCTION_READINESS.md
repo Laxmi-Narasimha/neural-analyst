@@ -68,13 +68,13 @@ Last updated: 2026-11-24 (branch `feature/talk-to-data-scope-and-ml-trust`).
 | D3 | Target leakage: copies, deterministic encodings, post-outcome dates | Verified | Same |
 | D4 | 30 hostile datasets (tiny, wide, imbalanced, text, JSON cells, inf, unicode, duplicates…) | Verified | `test_ml_robustness.py` |
 | D5 | Train → save → restart → predict raw rows via API | Verified | `test_api_train_then_predict_with_returned_name_and_version` |
-| D6 | Imbalanced targets: metric choice (PR-AUC), threshold selection, class weights | Partial | Metrics reported; selection still ROC AUC; no threshold tuning |
-| D7 | Probability calibration | Gap | Reliability curve + calibrated model option |
-| D8 | Error analysis by segment ("where does the model fail?") | Gap | Per-segment held-out metrics |
-| D9 | "Prediction moment" chosen by the user, not inferred | Gap | Explicit cutoff column in plan; inference is a heuristic today |
-| D10 | Batch scoring of next week's file with drift check | Gap | Upload → score → compare feature distributions to training |
+| D6 | Imbalanced targets: metric choice, threshold, class weights | Verified | Rarer class < 20% (two classes) or < 10% (more): selection on average precision / macro F1. Two-class: cut-off maximising F1 on out-of-fold training rows, stored with the model and used by `predict`; precision/recall at other cut-offs reported. On the 10%-fraud fixture held-out recall goes 19% → 46%. Class weights opt-in (`balance_class_weights`) because they distort probabilities. `test_ml_evaluation_depth.py` |
+| D7 | Probability calibration | Verified (two classes) | Sigmoid/isotonic map learned on out-of-fold probabilities, kept only if it lowers the Brier score under its own cross-validation; held-out reliability bins, Brier and ECE before/after. Multiclass: reliability of the predicted class's confidence only, no map |
+| D8 | Error analysis by segment | Verified | Held-out error rate (or MAE) per category / numeric quartile, significance by Wilson interval (or z-test), tiny segments and identifiers skipped; the weakest significant segment is named in the chat answer |
+| D9 | Prediction moment chosen by the user | Verified | `time_column` + `test_start` (backtest date) on the API, jobs and the chat planner; an inferred time column is labelled as an assumption the user should confirm |
+| D10 | Batch scoring of a new file with drift check | Verified | `POST /ml/models/{name}/score`: every row (cap `ML_MAX_SCORING_ROWS`, refused above it, never sampled) → predictions table artifact, PSI per input vs a training profile stored in the model (no rows kept), prediction-mix shift, and realised accuracy/MAE when the file has the outcome. Gap: files above the cap need chunked scoring; no chat operator yet |
 | D11 | Explaining a single prediction | Gap | `/ml/explain` returns global importance only for bundled models |
-| D12 | Async AutoML jobs honour `time_column` / `split` overrides | Gap | Sync path does; job payload doesn't carry them |
+| D12 | Async AutoML jobs honour `time_column` / `split` overrides | Verified | Local and Celery jobs carry `time_column`, `split`, `test_start`, `balance_class_weights` |
 | D13 | Deep learning / NLP beyond TF-IDF | Gap by design | Only where it beats tabular baselines on real tasks; keep optional |
 | D14 | Pickle loading of model artifacts | Partial | Only files inside the owner's own registry folder are loaded (a tampered entry pointing elsewhere is refused, `test_tenant_isolation.py`); signing artifacts still recommended |
 
@@ -160,5 +160,5 @@ arbitrary formulas over 3+ columns, and real user phrasing collected from produc
 2. ~~**B12** Real-model evaluation set and scorer~~: done. Rerun it on every planner change.
 3. ~~**B7/B8** Derived metrics and period-over-period with contribution~~: done.
 4. ~~**F** Per-owner model registry and an ownership audit of all routes~~: done (F12 tests per router still to add).
-5. **D6–D10** Imbalance handling, calibration, segment error analysis, explicit prediction moment, batch scoring with drift.
+5. ~~**D6–D10** Imbalance handling, calibration, segment error analysis, explicit prediction moment, batch scoring with drift~~: done (chunked scoring of very large files and a chat "score this file" operator still open).
 6. **A4–A6** Encoding/locale/header detection fixtures.

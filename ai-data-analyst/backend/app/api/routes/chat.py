@@ -199,6 +199,45 @@ class ConversationRepository:
 # Chat Service
 # ============================================================================
 
+def _training_quality_lines(summary: dict[str, Any]) -> list[str]:
+    """Imbalance, cut-off, calibration and weakest segment, in the user's terms."""
+    lines: list[str] = []
+    balance = summary.get("class_balance") or {}
+    if balance.get("imbalanced") and summary.get("selection_metric_reason"):
+        lines.append(f"**Rare outcome:** {summary['selection_metric_reason']}")
+    thr = summary.get("decision_threshold") or {}
+    if thr.get("threshold") is not None:
+        chosen, default = thr.get("held_out_at_chosen") or {}, thr.get("held_out_at_default_0_5") or {}
+        lines.append(
+            f"**Decision cut-off:** predicts **{thr.get('positive_class')}** when its probability is at least "
+            f"{float(thr['threshold']):.3f} (chosen on training folds). On held-out rows it finds "
+            f"{float(chosen.get('recall') or 0):.0%} of them with {float(chosen.get('precision') or 0):.0%} precision; "
+            f"the usual 0.5 would find {float(default.get('recall') or 0):.0%}."
+        )
+    cal = summary.get("calibration") or {}
+    before = (cal.get("held_out_before") or {}).get("ece")
+    after = (cal.get("held_out_after") or {}).get("ece")
+    if cal.get("applied") and before is not None and after is not None:
+        lines.append(f"**Probabilities:** calibrated ({cal.get('method')}); held-out calibration error "
+                     f"{float(before):.3f} → {float(after):.3f}.")
+    elif before is not None:
+        lines.append(f"**Probabilities:** held-out calibration error {float(before):.3f} "
+                     "(average gap between predicted and actual rates).")
+    seg = summary.get("error_by_segment") or {}
+    weak = [s for s in seg.get("worst_segments") or [] if s.get("significant")]
+    if weak:
+        s, metric = weak[0], seg.get("metric", "error_rate")
+        lines.append(
+            f"**Weakest segment:** {s['column']} = {s['segment']}: {metric.replace('_', ' ')} "
+            f"{_fmt_number(s.get(metric))} vs {_fmt_number(seg.get('overall'))} overall ({int(s['rows']):,} held-out rows)."
+        )
+    split = summary.get("split") or {}
+    if split.get("time_column_source") == "inferred":
+        lines.append(f"**Prediction moment:** assumed to be **{split.get('time_column')}**; tell me if predictions "
+                     "are made at a different time, or give a backtest date.")
+    return lines
+
+
 def _fmt_number(value: Any) -> str:
     """Numbers as users read them: thousands separators, 2 decimals unless whole; missing -> n/a."""
     if value is None or isinstance(value, bool):
@@ -1929,6 +1968,7 @@ class ChatService:
                         f"{k}={float(v):.4f}" for k, v in list(metrics.items())[:4] if v is not None
                     ]
                     lines.append(f"**Held-out metrics:** {', '.join(metric_bits)}")
+                lines.extend(_training_quality_lines(summary))
                 leaky = summary.get("excluded_leaky_columns") or []
                 if leaky:
                     lines.append(
@@ -1948,9 +1988,10 @@ class ChatService:
                         f"**Most influential columns** (drop in {scoring} when shuffled on held-out rows):\n"
                         + "\n".join(feat_lines)
                     )
-                for w in (summary.get("warnings") or [])[:4]:
-                    if not str(w).startswith("Excluded columns that give away"):
-                        lines.append(f"⚠️ {w}")
+                shown = ("Excluded columns that give away", "Predictions use a cut-off", "The model is clearly worse",
+                         "The rarer class is under", "At least one class is under")
+                for w in [w for w in (summary.get("warnings") or []) if not str(w).startswith(shown)][:4]:
+                    lines.append(f"⚠️ {w}")
                 sampled = summary.get("sample_rows")
                 if sampled:
                     lines.append(f"Trained on **{int(sampled):,}** representative rows from your dataset.")

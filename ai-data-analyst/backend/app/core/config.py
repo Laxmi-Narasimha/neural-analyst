@@ -430,6 +430,8 @@ class MLConfig(BaseSettings):
     reservoir_chunk_rows: int = Field(default=100_000, ge=10_000, le=500_000)
     baseline_max_models: int = Field(default=4, ge=1, le=10)
     baseline_optimization_trials: int = Field(default=20, ge=0, le=100)
+    # Batch scoring scores every row; files larger than this are refused rather than sampled.
+    max_scoring_rows: int = Field(default=500_000, ge=1_000, le=10_000_000)
     
     # Feature engineering
     max_features_auto_select: int = Field(default=50, ge=10, le=500)

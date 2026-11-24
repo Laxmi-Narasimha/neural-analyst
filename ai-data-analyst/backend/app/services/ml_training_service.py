@@ -79,6 +79,8 @@ class MLTrainingService:
         sample_rows: int | None = None,
         time_column: str | None = None,
         split: str | None = None,
+        test_start: str | None = None,
+        balance_class_weights: bool = False,
     ) -> dict[str, Any]:
         context = LogContext(component="MLTrainingService", operation="run_baseline_training")
         sample_rows = int(sample_rows or settings.ml.chat_training_sample_rows)
@@ -104,6 +106,8 @@ class MLTrainingService:
             optimization_timeout=min(600, int(settings.ml.automl_time_budget)),
             time_column=time_column,
             split=split,
+            test_start=test_start,
+            balance_class_weights=balance_class_weights,
             description=f"Baseline training on {target_column}",
             tags={"dataset_id": str(dataset_id), "dataset_version": version_hash, "mode": "baseline"},
             extra_params={"sampling": sampling_meta},
@@ -133,6 +137,8 @@ class MLTrainingService:
         optimize: bool = True,
         time_column: str | None = None,
         split: str | None = None,
+        test_start: str | None = None,
+        balance_class_weights: bool = False,
     ) -> None:
         context = LogContext(component="MLTrainingService", operation="run_automl_job")
         sample_rows = int(sample_rows or settings.ml.automl_training_sample_rows)
@@ -169,6 +175,8 @@ class MLTrainingService:
                 optimization_timeout=int(settings.ml.automl_time_budget),
                 time_column=time_column,
                 split=split,
+                test_start=test_start,
+                balance_class_weights=balance_class_weights,
                 description=f"AutoML training on {target_column}",
                 tags={"dataset_id": str(dataset_id), "dataset_version": version_hash, "mode": "automl"},
                 extra_params={"sampling": sampling_meta},

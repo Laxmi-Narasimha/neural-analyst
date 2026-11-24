@@ -140,9 +140,13 @@ def enqueue_ml_training(
     sample_rows: Optional[int] = None,
     max_models: Optional[int] = None,
     optimize: bool = True,
+    options: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """
     Enqueue AutoML / full ML training on a representative sample.
+
+    ``options`` carries the evaluation choices (time_column, split, test_start,
+    balance_class_weights) so a queued job evaluates exactly like a direct run.
 
     - LOCAL: FastAPI BackgroundTasks
     - CELERY: Celery distributed workers
@@ -156,6 +160,7 @@ def enqueue_ml_training(
         "sample_rows": sample_rows,
         "max_models": max_models,
         "optimize": optimize,
+        "options": dict(options or {}),
     }
 
     if settings.job_executor == JobExecutor.CELERY:
@@ -182,6 +187,7 @@ def enqueue_ml_training(
                 sample_rows=sample_rows,
                 max_models=max_models,
                 optimize=optimize,
+                **dict(options or {}),
             )
 
     background_tasks.add_task(lambda: __import__("asyncio").run(_run()))

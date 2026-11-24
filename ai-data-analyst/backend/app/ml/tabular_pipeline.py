@@ -359,7 +359,12 @@ class ModelBundle:
     used_columns: Optional[list[str]] = None
     training_info: dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    schema_version: int = 1
+    schema_version: int = 2
+    # Version 2. Bundles saved before have none of these; every use goes through getattr.
+    calibrator: Any = None                       # {"positive_index", "map"} for two-class targets
+    decision_threshold: Optional[dict[str, Any]] = None  # {"positive_index", "threshold"}
+    reference_profile: Optional[dict[str, Any]] = None   # training-input profile for drift checks
+    prediction_reference: Optional[dict[str, Any]] = None  # held-out prediction mix at training time
 
     @property
     def is_classifier(self) -> bool:
@@ -389,8 +394,24 @@ class ModelBundle:
         frame.columns = dedupe_column_names(frame.columns)
         return frame.reindex(columns=self.input_columns)
 
+    def _proba(self, frame: pd.DataFrame) -> np.ndarray:
+        proba = np.asarray(self.pipeline.predict_proba(frame), dtype=float)
+        cal = getattr(self, "calibrator", None)
+        if cal and proba.shape[1] == 2:
+            pos = int(cal["positive_index"])
+            p = np.asarray(cal["map"](proba[:, pos]), dtype=float)
+            proba[:, pos], proba[:, 1 - pos] = p, 1.0 - p
+        return proba
+
     def predict(self, df: pd.DataFrame) -> list[Any]:
-        raw = self.pipeline.predict(self._frame(df))
+        frame = self._frame(df)
+        thr = getattr(self, "decision_threshold", None)
+        if self.is_classifier and thr and hasattr(self.pipeline, "predict_proba"):
+            pos = int(thr["positive_index"])
+            p = self._proba(frame)[:, pos]
+            raw = np.where(p >= float(thr["threshold"]), pos, 1 - pos)
+        else:
+            raw = self.pipeline.predict(frame)
         if self.is_classifier:
             return [self.classes[int(i)] for i in raw]
         return [float(v) for v in raw]
@@ -398,7 +419,17 @@ class ModelBundle:
     def predict_proba(self, df: pd.DataFrame) -> Optional[list[list[float]]]:
         if not self.is_classifier or not hasattr(self.pipeline, "predict_proba"):
             return None
-        return np.asarray(self.pipeline.predict_proba(self._frame(df)), dtype=float).tolist()
+        return self._proba(self._frame(df)).tolist()
+
+    def drift_report(self, df: pd.DataFrame) -> Optional[dict[str, Any]]:
+        profile = getattr(self, "reference_profile", None)
+        if not profile:
+            return None
+        from app.ml.drift import compare
+
+        frame = df.copy()
+        frame.columns = dedupe_column_names(frame.columns)
+        return compare(profile, frame)
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -410,5 +441,8 @@ class ModelBundle:
             "classes": list(self.classes) if self.classes is not None else None,
             "training_info": self.training_info,
             "created_at": self.created_at,
-            "schema_version": self.schema_version,
+            "schema_version": getattr(self, "schema_version", 1),
+            "calibrated": bool(getattr(self, "calibrator", None)),
+            "decision_threshold": getattr(self, "decision_threshold", None),
+            "has_drift_reference": bool(getattr(self, "reference_profile", None)),
         }

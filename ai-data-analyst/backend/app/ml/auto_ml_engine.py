@@ -547,6 +547,16 @@ def _python_scalar(value: Any) -> Any:
     return value.item() if isinstance(value, np.generic) else value
 
 
+class _FixedProba:
+    """Stands in for a model whose probabilities were already computed (calibrated, thresholded)."""
+
+    def __init__(self, proba: np.ndarray):
+        self._proba = proba
+
+    def predict_proba(self, X: Any) -> np.ndarray:
+        return self._proba
+
+
 class AdvancedAutoMLEngine:
     """
     AutoML engine whose reported scores mean what they say.
@@ -581,6 +591,8 @@ class AdvancedAutoMLEngine:
         verbose: bool = True,
         max_onehot_categories: int = 20,
         exclude_leaky_columns: bool = True,
+        balance_class_weights: bool = False,
+        test_start: Optional[str] = None,
     ):
         self.test_size = test_size
         self.cv_folds = cv_folds
@@ -593,6 +605,16 @@ class AdvancedAutoMLEngine:
         self.verbose = verbose
         self.max_onehot_categories = max_onehot_categories
         self.exclude_leaky_columns = exclude_leaky_columns
+        # Off by default: reweighting distorts probabilities, while a tuned threshold on calibrated
+        # probabilities reaches the same recall and keeps the probabilities meaningful.
+        self.balance_class_weights = balance_class_weights
+        # The prediction moment for a backtest: train on rows before this date, test on the rest.
+        self.test_start = test_start
+        self._class_balance: Optional[Dict[str, Any]] = None
+        self._calibrator: Any = None
+        self._decision_threshold: Optional[Dict[str, Any]] = None
+        self._reference_profile: Optional[Dict[str, Any]] = None
+        self._prediction_reference: Optional[Dict[str, Any]] = None
 
         # State
         self._trained_models: Dict[str, Tuple[Optional[Pipeline], ModelTrainingResult]] = {}
@@ -639,6 +661,11 @@ class AdvancedAutoMLEngine:
         )
         run_warnings.extend(name_notes)
         self._target_column = target_column
+        self._class_balance = None
+        self._calibrator = None
+        self._decision_threshold = None
+        self._reference_profile = None
+        self._prediction_reference = None
 
         # Step 1: understand the target values, then never impute them.
         target_series, target_notes = self._clean_target(df[target_column], task)
@@ -730,11 +757,20 @@ class AdvancedAutoMLEngine:
             ordered_time = time_values.iloc[order]
             n_test = max(1, int(round(len(X) * self.test_size)))
             cut = len(X) - n_test
+            if self.test_start:
+                boundary = pd.Timestamp(self.test_start)
+                cut = int(np.searchsorted(ordered_time.to_numpy(), np.datetime64(boundary), side="left"))
+                if cut < 20 or cut >= len(X):
+                    raise MLException(
+                        f"Testing from {boundary.date()} leaves {cut:,} training rows and {len(X) - cut:,} test rows; "
+                        "choose a date with at least 20 rows before it and some after it."
+                    )
             X_train, X_test = X.iloc[:cut], X.iloc[cut:]
             y_train, y_test = y[:cut], y[cut:]
             split_info = {
                 "strategy": "time_ordered",
                 "time_column": time_column,
+                "test_start": str(pd.Timestamp(self.test_start).date()) if self.test_start else None,
                 "train_period": [str(ordered_time.iloc[0]), str(ordered_time.iloc[cut - 1])],
                 "test_period": [str(ordered_time.iloc[cut]), str(ordered_time.iloc[-1])],
             }
@@ -757,7 +793,18 @@ class AdvancedAutoMLEngine:
             raise MLException("The training split contains a single class; there is nothing to learn")
 
         cv = self._get_cv_strategy(task, y_train, time_ordered=time_values is not None)
+        scoring_reason = None
         scoring = self._get_scoring(task)
+        if is_classification:
+            from app.ml.evaluation import class_balance, selection_metric
+
+            self._class_balance = class_balance(y_train, len(self._classes or []))
+            if not self.scoring:
+                scoring, scoring_reason = selection_metric(
+                    len(self._classes or []), self._class_balance["imbalanced"]
+                )
+                if self._class_balance["imbalanced"]:
+                    run_warnings.append(scoring_reason)
 
         # Step 6: baseline.
         baseline_pipe, baseline_result = self._train_single_model(
@@ -819,6 +866,9 @@ class AdvancedAutoMLEngine:
         if importance_note:
             run_warnings.append(importance_note)
 
+        # Step 9b: calibration, decision threshold, error by segment, drift reference.
+        evaluation = self._evaluate_best(best, best_pipe, X_train, y_train, X_test, y_test, cv, task, run_warnings)
+
         # Step 10: compare with the baseline, fold by fold.
         beats_baseline: Optional[bool] = None
         improvement = self._paired_improvement(best, baseline_result)
@@ -864,6 +914,9 @@ class AdvancedAutoMLEngine:
             "excluded_leaky_columns": leakage if self.exclude_leaky_columns else [],
             "preprocessing": prep_summary,
             "importance_method": "permutation importance on the held-out split",
+            "class_balance": self._class_balance,
+            "selection_metric_reason": scoring_reason,
+            **evaluation,
             "warnings": run_warnings,
         }
         if self.verbose:
@@ -885,6 +938,7 @@ class AdvancedAutoMLEngine:
         if name is None or name not in self._trained_models or self._trained_models[name][0] is None:
             raise MLException("No trained model available to package")
         pipe, result = self._trained_models[name]
+        is_best = name == self._best_model_name
         info = dict(self.training_report)
         info.update(
             {
@@ -903,7 +957,111 @@ class AdvancedAutoMLEngine:
             classes=list(self._classes) if self._classes is not None else None,
             used_columns=list(pipe.named_steps["prep"].column_roles_.keys()),
             training_info=info,
+            calibrator=self._calibrator if is_best else None,
+            decision_threshold=self._decision_threshold if is_best else None,
+            reference_profile=self._reference_profile,
+            prediction_reference=self._prediction_reference if is_best else None,
         )
+
+    def _evaluate_best(
+        self,
+        best: "ModelTrainingResult",
+        pipe: Pipeline,
+        X_train: pd.DataFrame,
+        y_train: np.ndarray,
+        X_test: pd.DataFrame,
+        y_test: np.ndarray,
+        cv: Any,
+        task: MLTask,
+        run_warnings: List[str],
+    ) -> Dict[str, Any]:
+        """Decisions on out-of-fold training predictions; the held-out split is only scored."""
+        from app.ml import drift, evaluation as ev
+
+        out: Dict[str, Any] = {"calibration": None, "decision_threshold": None, "error_by_segment": None}
+        is_classification = task in _CLASSIFICATION_TASKS
+        n_classes = len(self._classes or [])
+        y_pred_test = pipe.predict(X_test)
+
+        if is_classification and hasattr(pipe, "predict_proba"):
+            try:
+                raw_test = np.asarray(pipe.predict_proba(X_test), dtype=float)
+                if n_classes == 2:
+                    pos = int((self._class_balance or {}).get("minority_class_index", 1))
+                    oof, mask = ev.out_of_fold_proba(pipe, X_train, y_train, cv)
+                    p_oof = oof[mask, pos]
+                    y_oof = (y_train[mask] == pos).astype(int)
+                    y_pos_test = (y_test == pos).astype(int)
+                    calibrator, cal_info = ev.choose_calibration(p_oof, y_oof, self.random_state)
+                    p_test = raw_test[:, pos]
+                    cal_info["held_out_before"] = ev.reliability(y_pos_test, p_test)
+                    if calibrator is not None:
+                        p_oof = calibrator(p_oof)
+                        p_test = calibrator(p_test)
+                        cal_info["held_out_after"] = ev.reliability(y_pos_test, p_test)
+                        self._calibrator = {"positive_index": pos, "map": calibrator}
+                    cal_info["positive_class"] = str(self._classes[pos])
+                    out["calibration"] = cal_info
+                    if (self._class_balance or {}).get("imbalanced") and y_oof.sum() >= 5:
+                        thr = ev.choose_threshold(y_oof, p_oof)
+                        thr["positive_class"] = str(self._classes[pos])
+                        thr["held_out_at_default_0_5"] = ev.scores_at_threshold(y_pos_test, p_test, 0.5)
+                        thr["held_out_at_chosen"] = ev.scores_at_threshold(y_pos_test, p_test, thr["threshold"])
+                        self._decision_threshold = {"positive_index": pos, "threshold": thr["threshold"]}
+                        out["decision_threshold"] = thr
+                        y_pred_test = np.where(p_test >= thr["threshold"], pos, 1 - pos)
+                        proba_view = raw_test.copy()
+                        proba_view[:, pos] = p_test
+                        proba_view[:, 1 - pos] = 1 - p_test
+                        best.test_metrics = self._classification_metrics(
+                            y_test, y_pred_test, _FixedProba(proba_view), X_test, n_classes
+                        )
+                        run_warnings.append(
+                            f"Predictions use a cut-off of {thr['threshold']:.3f} on the probability of "
+                            f"'{thr['positive_class']}' (chosen on training folds); at 0.5 the model would "
+                            f"find {thr['held_out_at_default_0_5']['recall']:.0%} of them on held-out rows, "
+                            f"at the chosen cut-off {thr['held_out_at_chosen']['recall']:.0%}."
+                        )
+                else:
+                    confident = raw_test.max(axis=1)
+                    out["calibration"] = {
+                        "applied": False, "method": None,
+                        "reason": "calibration maps are learned for two-class targets only; shown: confidence of the predicted class",
+                        "held_out_before": ev.reliability((raw_test.argmax(axis=1) == y_test).astype(int), confident),
+                    }
+            except Exception as e:  # never lose a trained model over a report
+                run_warnings.append(f"Calibration and threshold checks were skipped ({e}).")
+
+        try:
+            out["error_by_segment"] = ev.error_by_segment(
+                X_test.reset_index(drop=True),
+                np.asarray(y_test),
+                np.asarray(y_pred_test),
+                task="regression" if not is_classification else "classification",
+            )
+            flagged = [s for s in out["error_by_segment"]["worst_segments"] if s["significant"]]
+            if flagged:
+                s = flagged[0]
+                metric = out["error_by_segment"]["metric"].replace("_", " ")
+                run_warnings.append(
+                    f"The model is clearly worse for {s['column']} = {s['segment']} ({s['rows']} held-out rows, "
+                    f"{metric} {s[out['error_by_segment']['metric']]} vs {s['overall']} overall)."
+                )
+        except Exception as e:
+            run_warnings.append(f"Error-by-segment analysis was skipped ({e}).")
+
+        try:
+            used = list(pipe.named_steps["prep"].column_roles_.keys())
+            self._reference_profile = drift.build_profile(X_train, used)
+            if is_classification:
+                labels = pd.Series([str(self._classes[int(i)]) for i in y_pred_test]).value_counts(normalize=True)
+                self._prediction_reference = {"class_shares": {str(k): round(float(v), 4) for k, v in labels.items()}}
+            else:
+                vals = np.asarray(y_pred_test, dtype=float)
+                self._prediction_reference = {"mean": round(float(vals.mean()), 4), "std": round(float(vals.std()), 4)}
+        except Exception as e:
+            run_warnings.append(f"No drift reference was stored ({e}); scoring new files will skip the drift check.")
+        return out
 
     def predict(self, df: pd.DataFrame, model_name: Optional[str] = None) -> List[Any]:
         """Predict raw rows with a trained model (labels decoded for classification)."""
@@ -1261,6 +1419,14 @@ class AdvancedAutoMLEngine:
             config = ModelLibrary.get(model_name)
             estimator = config.estimator_class(**config.default_params)
             display = config.display_name
+            if (
+                self.balance_class_weights
+                and is_classification
+                and (self._class_balance or {}).get("imbalanced")
+                and "class_weight" in estimator.get_params()
+            ):
+                estimator.set_params(class_weight="balanced")
+                display = f"{display} (balanced class weights)"
 
         pipe = self._make_pipeline(estimator)
         result = ModelTrainingResult(

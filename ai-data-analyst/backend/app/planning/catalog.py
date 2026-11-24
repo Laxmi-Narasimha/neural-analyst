@@ -281,7 +281,9 @@ CATALOG: dict[str, OperatorSpec] = {
             "Predict / classify / model / what drives an outcome column, when the outcome is known.",
             (
                 Param("target_column", "column", "Column to predict", required=True),
-                Param("time_column", "column", "Date that orders rows for evaluation", column_types=(DATETIME,)),
+                Param("time_column", "column", "Date that orders rows for evaluation: the moment a prediction is made",
+                      column_types=(DATETIME,)),
+                Param("test_start", "date", "Backtest from this date: train on earlier rows, test on this date and later"),
                 Param("optimize", "bool", "Tune hyperparameters (slower)", default=False),
             ),
         ),

@@ -95,6 +95,7 @@ class MLTrainBaselineOperator:
             exclude_columns=list(exclude) if exclude else None,
             time_column=params.get("time_column") or None,
             split=params.get("split"),
+            test_start=params.get("test_start") or None,
             description=f"Chat baseline training on {target}",
             tags={
                 "dataset_id": str(ctx.dataset_id),

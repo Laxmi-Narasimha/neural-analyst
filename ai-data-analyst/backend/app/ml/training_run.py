@@ -97,6 +97,11 @@ class TrainingRun:
                 "cross_validation": self.report.get("cross_validation"),
                 "excluded_leaky_columns": self.report.get("excluded_leaky_columns"),
                 "preprocessing": self.report.get("preprocessing"),
+                "class_balance": self.report.get("class_balance"),
+                "selection_metric_reason": self.report.get("selection_metric_reason"),
+                "calibration": self.report.get("calibration"),
+                "decision_threshold": self.report.get("decision_threshold"),
+                "error_by_segment": self.report.get("error_by_segment"),
                 "rows_used": self.report.get("rows_used"),
                 "rows_dropped_missing_target": self.report.get("rows_dropped_missing_target"),
                 "warnings": list(dict.fromkeys(self.notes + list(self.report.get("warnings") or []))),
@@ -124,6 +129,8 @@ def run_training(
     tags: Optional[dict[str, str]] = None,
     extra_params: Optional[dict[str, Any]] = None,
     random_state: int = 42,
+    test_start: Optional[str] = None,
+    balance_class_weights: bool = False,
 ) -> TrainingRun:
     if owner_id is None:
         raise ValueError("Training needs a signed-in owner to keep the model under")
@@ -132,9 +139,25 @@ def run_training(
     df, target_column, time_column, exclude_columns, _ = AdvancedAutoMLEngine._normalise_frame(
         df, target_column, time_column, exclude_columns
     )
+    if test_start and str(split or "").strip().lower() in {"random", "random_split", "shuffle"}:
+        raise ValueError("A test start date needs a time-ordered split, not a random one")
     chosen_time, notes = resolve_split_time_column(
         df, target_column=target_column, time_column=time_column, split=split
     )
+    if test_start:
+        try:
+            test_start = str(pd.Timestamp(test_start).date())
+        except (ValueError, TypeError):
+            raise ValueError(f"'{test_start}' is not a date") from None
+        if chosen_time is None:
+            raise ValueError("A test start date needs a date column to order rows by; none was found")
+    # Who chose the prediction moment matters: an inferred one is a guess the user should confirm.
+    time_source = "user" if time_column else ("inferred" if chosen_time else None)
+    if time_source == "inferred":
+        notes.append(
+            f"'{chosen_time}' was taken as the moment a prediction is made. If predictions are made at a "
+            "different time, set time_column (and test_start for the backtest date)."
+        )
     strategy = optimization_strategy
     if strategy is None:
         strategy = OptimizationStrategy.BAYESIAN if optimize else OptimizationStrategy.NONE
@@ -144,6 +167,8 @@ def run_training(
         optimization_timeout=int(optimization_timeout),
         random_state=random_state,
         verbose=False,
+        test_start=test_start,
+        balance_class_weights=bool(balance_class_weights),
     )
     results = engine.auto_train(
         df,
@@ -178,6 +203,7 @@ def run_training(
         description=description,
         tags=tags or {},
     )
+    engine.training_report.setdefault("split", {})["time_column_source"] = time_source
     return TrainingRun(
         engine=engine,
         results=results,

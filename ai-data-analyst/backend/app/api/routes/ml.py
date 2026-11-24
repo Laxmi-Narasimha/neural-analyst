@@ -71,6 +71,18 @@ class TrainModelRequest(BaseModel):
         default=None,
         description="auto (default: time-ordered when a date column exists) or random",
     )
+    test_start: Optional[str] = Field(
+        default=None,
+        description="Backtest date: train on rows before it, test on rows from it (needs a time-ordered split)",
+    )
+    balance_class_weights: bool = Field(
+        default=False,
+        description="Reweight classes for imbalanced targets (off: a tuned threshold keeps probabilities honest)",
+    )
+
+    def evaluation_options(self) -> dict[str, Any]:
+        return {"time_column": self.time_column, "split": self.split, "test_start": self.test_start,
+                "balance_class_weights": bool(self.balance_class_weights)}
 
 
 class TrainModelResponse(BaseModel):
@@ -103,6 +115,19 @@ class AutoMLRequest(BaseModel):
     max_models: int = 10
     sample_rows: Optional[int] = None
     optimize: bool = True
+    time_column: Optional[str] = None
+    split: Optional[str] = None
+    test_start: Optional[str] = None
+    balance_class_weights: bool = False
+
+    def evaluation_options(self) -> dict[str, Any]:
+        return {"time_column": self.time_column, "split": self.split, "test_start": self.test_start,
+                "balance_class_weights": bool(self.balance_class_weights)}
+
+
+class ScoreDatasetRequest(BaseModel):
+    dataset_id: UUID
+    version: Optional[int] = None
 
 
 class ExplainRequest(BaseModel):
@@ -187,6 +212,7 @@ async def train_model(
                 "sample_rows": request.sample_rows or settings.ml.automl_training_sample_rows,
                 "max_models": request.max_models or settings.ml.automl_max_models,
                 "optimize": request.optimize,
+                **request.evaluation_options(),
             },
             status_message="Queued AutoML training",
         )
@@ -200,6 +226,7 @@ async def train_model(
             sample_rows=request.sample_rows,
             max_models=request.max_models,
             optimize=request.optimize,
+            options=request.evaluation_options(),
         )
         return TrainModelResponse(
             job_id=str(job.id),
@@ -220,6 +247,8 @@ async def train_model(
         sample_rows=request.sample_rows,
         time_column=request.time_column,
         split=request.split,
+        test_start=request.test_start,
+        balance_class_weights=request.balance_class_weights,
     )
     return TrainModelResponse(
         status="completed",
@@ -260,6 +289,7 @@ async def run_automl(
             "sample_rows": request.sample_rows or settings.ml.automl_training_sample_rows,
             "max_models": request.max_models,
             "optimize": request.optimize,
+            **request.evaluation_options(),
         },
         status_message="Queued AutoML",
     )
@@ -273,11 +303,36 @@ async def run_automl(
         sample_rows=request.sample_rows,
         max_models=request.max_models,
         optimize=request.optimize,
+        options=request.evaluation_options(),
     )
     return TrainModelResponse(
         job_id=str(job.id),
         status="queued",
         message="AutoML job started",
+    )
+
+
+@router.post(
+    "/models/{model_name}/score",
+    dependencies=[Depends(require_permission(Permission.RUN_ANALYSIS))],
+)
+async def score_dataset(
+    model_name: str,
+    request: ScoreDatasetRequest,
+    user: AuthUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Score every row of one of your datasets with one of your models, with a drift check."""
+    from app.services.ml_scoring_service import MLScoringService
+
+    model = _load_owned_model(user, model_name, request.version)
+    version = request.version or max(v["version"] for v in _registry(user).get_model_versions(model_name))
+    return await MLScoringService(db).score_dataset(
+        owner_id=user.user_id,
+        model=model,
+        model_name=model_name,
+        model_version=version,
+        dataset_id=request.dataset_id,
     )
 
 
