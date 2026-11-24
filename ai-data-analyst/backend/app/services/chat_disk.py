@@ -73,6 +73,8 @@ def _aggregate(con, op, p, fields, numeric, dates):
             rows.append((name, *stats))
         table = pd.DataFrame(rows, columns=["column", "count", "mean", "std", "min", "25%", "50%", "75%", "max"])
         return _result("numeric_summary", table, {"numeric_columns": len(rows)}, {"numeric_columns": len(rows)})
+    if op in {"ratio", "share_of_total", "period_compare"}:
+        return _derived(con, op, p, fields, numeric)
     if op == "rate":
         col, group = p["column"], p.get("group_by")
         c = fields[col]
@@ -186,6 +188,52 @@ def _aggregate(con, op, p, fields, numeric, dates):
     return None
 
 
+def _derived(con, op, p, fields, numeric):
+    """SQL for the base sums and counts; the answer itself comes from the shared finish functions."""
+    from app.compute.operators import derived as d
+
+    group = p.get("group_by")
+    g_sel = f'cast({fields[group]} AS VARCHAR) AS "group", ' if group else ""
+    g_by = f" GROUP BY {fields[group]}" if group else ""
+
+    def num(name):
+        if name not in numeric:
+            raise ValueError(f"{name} is not numeric")
+        return f"CASE WHEN isfinite({fields[name]}) THEN {fields[name]} END"
+
+    if op == "ratio":
+        parts = {"num": num(p["numerator_column"]), "den": num(p["denominator_column"])}
+        if p.get("subtract_column"):
+            parts["sub"] = num(p["subtract_column"])
+        complete = " AND ".join(f"({e}) IS NOT NULL" for e in parts.values())
+        sums = ", ".join(f"coalesce(sum({e}), 0) AS {k}" for k, e in parts.items())
+        base = con.execute(f"SELECT {g_sel}{sums}, count(*) AS rows FROM matches WHERE {complete}{g_by}").fetchdf()
+        excluded = con.execute(f"SELECT count(*) FROM matches WHERE NOT ({complete})").fetchone()[0]
+        if not group and base.empty:
+            base = pd.DataFrame([{**{k: 0.0 for k in parts}, "rows": 0}])
+        return d.ratio_finish(base, p, int(excluded))
+    if op == "share_of_total":
+        expr = f"sum({num(p['value_column'])})" if p.get("value_column") else "count(*)"
+        base = con.execute(f'SELECT cast({fields[group]} AS VARCHAR) AS "group", {expr} AS value FROM matches '
+                           f"GROUP BY {fields[group]}").fetchdf()
+        return d.share_finish(base, p)
+    # period_compare
+    t = fields[p["time_column"]]
+    data_max = con.execute(f"SELECT max({t}) FROM matches").fetchone()[0]
+    periods = d.resolve_periods(p, pd.Timestamp(data_max) if data_max is not None else None)
+    agg = p.get("aggregation", "sum")
+    v = num(p["value_column"]) if (p.get("value_column") and agg != "count") else "1.0"
+    (cs, ce), (ps, pe) = periods.current, periods.previous
+    cur = f"{t} >= TIMESTAMP '{cs.isoformat()}' AND {t} < TIMESTAMP '{ce.isoformat()}' AND ({v}) IS NOT NULL"
+    prev = f"{t} >= TIMESTAMP '{ps.isoformat()}' AND {t} < TIMESTAMP '{pe.isoformat()}' AND ({v}) IS NOT NULL"
+    base = con.execute(
+        f"SELECT {g_sel}coalesce(sum(CASE WHEN {cur} THEN {v} END), 0) AS cur_sum, "
+        f"count(CASE WHEN {cur} THEN 1 END) AS cur_n, "
+        f"coalesce(sum(CASE WHEN {prev} THEN {v} END), 0) AS prev_sum, "
+        f"count(CASE WHEN {prev} THEN 1 END) AS prev_n FROM matches{g_by}").fetchdf()
+    return d.period_finish(base, p, periods)
+
+
 def prepare_scan(record, edit, previous, plan, bindings):
     try:
         return _scan(record, edit, previous, plan, bindings)
@@ -247,7 +295,8 @@ def _scan(record, edit, previous, plan, bindings):
         else:
             types[name] = "VARCHAR"
     limit = dataset_batches.BATCH_ROWS
-    aggregates = {"measure_aggregate", "resample_aggregate", "segment_summary", "numeric_summary", "correlation_matrix", "rate"}
+    aggregates = {"measure_aggregate", "resample_aggregate", "segment_summary", "numeric_summary", "correlation_matrix", "rate",
+                  "ratio", "share_of_total", "period_compare"}
     exact = {"dataset_overview", "preview_rows", "schema_snapshot", "duckdb_profile", "missingness_scan"}
     needs_all = any(s["operator"] not in aggregates | exact or
                     (s["operator"] == "segment_summary" and not s.get("params", {}).get("group_by")) for s in plan)
@@ -255,10 +304,12 @@ def _scan(record, edit, previous, plan, bindings):
     for step in plan:
         op, params = step["operator"], step.get("params", {})
         if op in aggregates:
-            needed.update(params.get(k) for k in ("value_column", "time_column", "group_by", "column"))
+            needed.update(params.get(k) for k in ("value_column", "time_column", "group_by", "column",
+                                                   "numerator_column", "denominator_column", "subtract_column"))
             if op in {"numeric_summary", "correlation_matrix"}:
                 needed.update(numeric[:max(2, min(200, int(params.get("max_columns", 25))))])
-            elif not params.get("value_column") and numeric and op != "rate" and params.get("aggregation") not in {"count", "distinct_count"}:
+            elif (not params.get("value_column") and numeric and op not in {"rate", "ratio", "share_of_total", "period_compare"}
+                  and params.get("aggregation") not in {"count", "distinct_count"}):
                 needed.add(numeric[0])
             if op == "resample_aggregate" and not params.get("time_column") and dates:
                 needed.add(dates[0])

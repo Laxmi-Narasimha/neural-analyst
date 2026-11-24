@@ -40,8 +40,8 @@ Last updated: 2026-11-24 (branch `feature/talk-to-data-scope-and-ml-trust`).
 | B4 | Natural phrasing misread as a filter ("brings **in the most money**", "the West Branch"); restrictions the parser misses ("our western outlet") | Verified | Any rule-stage failure without a pending choice goes to the planner (parse, verify, bind, batched bind). Kept detected filters must match real values (`test_planner_value_binding.py`) |
 | B5 | Restrictions the system cannot express ("repeat customers", "big-ticket orders") | Verified | Planner returns a question instead of an answer (`test_llm_planner.py`) |
 | B6 | Hallucinated columns, wrong column types, sensitive columns in plans | Verified | `validate_plan` tests |
-| B7 | Derived metrics: ratios, per-unit, margin %, share of total, growth % | Partial | Rates (`rate` operator: churn, return, attrition, conversion) and counts / distinct counts done. Ratios of two columns, share of total and growth % still need a typed expression operator |
-| B8 | Period-over-period ("vs last month", YoY) and contribution to change | Gap | New operator; the flagship analyst question |
+| B7 | Derived metrics: ratios, per-unit, margin %, share of total, growth % | Verified | Typed operators instead of free formulas. `ratio` (sum/sum, optional subtraction, % form; only complete rows), `share_of_total`, `rate`, `count`/`distinct_count`. Pandas and DuckDB paths share the finishing code and are parity-tested (`test_derived_metrics.py`). Arbitrary formulas across 3+ columns are still out of scope |
+| B8 | Period-over-period ("vs last month", YoY) and contribution to change | Verified | `period_compare` returns both values, the change and the % change, and with group_by each group's change and its share of the total change. A period still in progress is compared over equal days. A finished period keeps the dates asked for and says when the data ends early. Without the planner, comparison questions are refused, never answered for one period |
 | B9 | Top-N with ties, bottom-N, "top 10 customers by revenue" | Partial | `segment_summary` ranks; N and ties not parameterised end to end |
 | B10 | Multi-dataset questions (joins, lookups) | Gap | Out of scope until single-dataset is solid |
 | B11 | Questions in Hindi/other languages, typos | Partial | Hinglish and typo cases pass the real-model eval; filter values are bound to real values with disclosed typo fixes. Only one non-English case so far |
@@ -103,34 +103,40 @@ Clarification UI for planner questions, display of "Interpreted as", evidence ta
 
 ## Real-model eval results
 
-42 cases × 3 datasets, run end to end through `/api/v1/chat` (2026-11-24). Run with
+53 cases on 4 datasets, run end to end through `/api/v1/chat` (2026-11-24). Run with
 `python -m evals.talk_eval.run --models <model>` from `ai-data-analyst/backend` (see `evals/talk_eval/README.md`).
 
-| Planner model | Pass (runs) | Median latency | Notes |
+| Planner model | Pass | Median latency | Notes |
 |---|---|---|---|
-| **gpt-5.4-mini** (default) | **100%** (3 runs, 126/126) | 1.7 s | Fastest of the accurate models |
-| gpt-4.1-mini | 100% (3 runs; one scorer false positive since fixed) | 2.1 s | Good fallback |
-| gpt-5-mini | 100% (2 runs at low reasoning effort) | 4.0 s | 9 s and 88% at default reasoning effort |
-| gpt-5.4-nano | 81% (1 run) | 1.8 s | Not accurate enough for planning |
+| **gpt-5.4-mini** (default) | **100%**: 106/106 over 2 runs of all 53 | 1.7 s | Plus 42/42 on 3 earlier runs of the original set |
+| gpt-4.1-mini | 98% (52/53), then 100% on the date cases after the dropped-date guard | 1.9 s | Good fallback |
+| gpt-5-mini | 100% on the original 42 (2 runs, low reasoning effort) | 4.0 s | 9 s and 88% at default reasoning effort |
+| gpt-5.4-nano | 81% on the original 42 | 1.8 s | Not accurate enough for planning |
 
-Before this pass, the same eval scored **64%** with gpt-5.4-mini. The fixes:
-- rule-stage failures now recover through the planner;
-- the model sees complete value lists, date ranges and identifier flags;
-- counts and rates are real operators;
-- filter values are bound to the data;
-- a silent wrong answer (`Returned ≠ "orders"` matched every row) is now refused;
-- a batched-path crash (HTTP 500) and a row-count crash are fixed;
-- all-distinct amounts are no longer treated as IDs.
+History:
+- **First pass (42 cases): 64% → 100%.** Fixes:
+  - rule-stage failures now recover through the planner;
+  - the model sees complete values, date ranges and identifier flags;
+  - counts and rates are real operators;
+  - filter values are bound to the data;
+  - a silent wrong answer (`Returned ≠ "orders"`) is refused;
+  - two crashes are fixed.
+- **Second pass (+11 cases):** ratios, margins, shares, period-over-period and drivers of change. 51/53 on the first run. Fixes:
+  - a "median ticket size" prompt conflict;
+  - "this month vs last month" ending today was not treated as in progress;
+  - a finished month was wrongly cut to the days the data happened to cover;
+  - a weaker model could drop a real "last month" filter, which code now forbids.
 
-Each fix is pinned offline in `tests/test_planner_value_binding.py`.
+Every fix is pinned offline in `tests/test_planner_value_binding.py` and `tests/test_derived_metrics.py`.
 
-The eval does not yet cover: workbooks, files over the batching threshold, ratios of two columns, period-over-period, multi-dataset questions, or real user phrasing collected from production.
+Not yet covered by the eval: workbooks, files over the batching threshold, multi-dataset questions,
+arbitrary formulas over 3+ columns, and real user phrasing collected from production.
 
 ## Build order
 
 1. ~~**B4** LLM-proposed filters as validated conditions~~: done.
 2. ~~**B12** Real-model evaluation set and scorer~~: done. Rerun it on every planner change.
-3. **B7/B8** Derived metrics and period-over-period with contribution — the flagship analyst answers.
+3. ~~**B7/B8** Derived metrics and period-over-period with contribution~~: done.
 4. **F** Per-owner model registry and an ownership audit of all routes.
 5. **D6–D10** Imbalance handling, calibration, segment error analysis, explicit prediction moment, batch scoring with drift.
 6. **A4–A6** Encoding/locale/header detection fixtures.

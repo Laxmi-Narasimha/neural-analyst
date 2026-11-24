@@ -87,8 +87,33 @@ def hr_people(seed: int = 3) -> pd.DataFrame:
     })
 
 
+PNL_LAST_DAY = date(2026, 11, 20)
+
+
+def store_pnl(seed: int = 5) -> pd.DataFrame:
+    """Daily revenue, cost and units per region and product line, ending on PNL_LAST_DAY."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    day = date(2025, 1, 1)
+    regions = {"North": 1.0, "South": 0.8, "East": 1.15, "West": 0.95}
+    lines = {"Core": (40.0, 0.62), "Premium": (120.0, 0.48), "Accessories": (15.0, 0.35)}
+    while day <= PNL_LAST_DAY:
+        season = 1 + 0.15 * np.sin(day.timetuple().tm_yday / 365 * 2 * np.pi)
+        for region, lift in regions.items():
+            for line, (price, cost_share) in lines.items():
+                if rng.random() < 0.35:
+                    continue
+                units = int(rng.poisson(6 * lift * season)) + 1
+                revenue = round(units * price * rng.uniform(0.9, 1.1), 2)
+                cost = round(revenue * cost_share * rng.uniform(0.92, 1.08), 2)
+                rows.append((day.isoformat(), region, line, units, revenue, cost))
+        day += timedelta(days=1)
+    return pd.DataFrame(rows, columns=["Date", "Region", "Product Line", "Units", "Revenue", "Cost"])
+
+
 DATASETS = {
     "retail_orders": retail_orders,
     "saas_accounts": saas_accounts,
     "hr_people": hr_people,
+    "store_pnl": store_pnl,
 }

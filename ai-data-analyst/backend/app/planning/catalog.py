@@ -7,6 +7,7 @@ dataset before anything runs:
 * ``enum``    - one of ``choices``
 * ``int``     - integer within [min, max]
 * ``bool``    - true/false
+* ``date``    - an ISO calendar date, YYYY-MM-DD
 * ``value``   - a value of the column named by the operator's ``column`` parameter,
                 bound to the real values in the data by the validator
 
@@ -29,7 +30,7 @@ ANY = "any"
 @dataclass(frozen=True)
 class Param:
     name: str
-    kind: str  # column | enum | int | bool | value
+    kind: str  # column | enum | int | bool | value | date
     description: str
     required: bool = False
     column_types: tuple[str, ...] = (ANY,)
@@ -99,6 +100,53 @@ CATALOG: dict[str, OperatorSpec] = {
                       "appears in the column's values", required=True),
                 Param("group_by", "column", "Optional grouping column", column_types=(CATEGORICAL, ANY)),
                 Param("ascending", "bool", "True ranks the lowest rate first", default=False),
+            ),
+        ),
+        OperatorSpec(
+            "ratio",
+            "Ratio of two totals, overall or per group: (sum of numerator - sum of subtract) / sum of "
+            "denominator, optionally as a percent. Only rows with all the columns present are used.",
+            "Revenue per unit, cost per order, price per seat, margin % = (revenue - cost) / revenue "
+            "(numerator revenue, subtract cost, denominator revenue, as_percent), discount rate = discount / "
+            "gross, conversion = orders / visits. Use when the metric divides one column by another.",
+            (
+                Param("numerator_column", "column", "Numeric column summed on top", required=True, column_types=(NUMERIC,)),
+                Param("denominator_column", "column", "Numeric column summed below", required=True, column_types=(NUMERIC,)),
+                Param("subtract_column", "column", "Optional numeric column subtracted from the numerator total "
+                      "(margin: cost)", column_types=(NUMERIC,)),
+                Param("group_by", "column", "Optional grouping column", column_types=(CATEGORICAL, ANY)),
+                Param("as_percent", "bool", "Multiply by 100", default=False),
+                Param("ascending", "bool", "True ranks the lowest first", default=False),
+            ),
+        ),
+        OperatorSpec(
+            "share_of_total",
+            "Each group's share of the total of a numeric column (or of the row count), in percent.",
+            "What share / percentage / mix / split of revenue (or orders) comes from each region, product, "
+            "channel; contribution of each group to the total.",
+            (
+                Param("group_by", "column", "Grouping column", required=True, column_types=(CATEGORICAL, ANY)),
+                Param("value_column", "column", "Numeric measure; omit to share the row count", column_types=(NUMERIC,)),
+            ),
+        ),
+        OperatorSpec(
+            "period_compare",
+            "Compare a measure between two date ranges (current vs previous): both values, the change and the "
+            "% change; with group_by, every group's change and its contribution to the total change. If the "
+            "current range runs past the last date in the data, both ranges are cut to the same number of days.",
+            "This month vs last month, Q3 vs Q2, October 2026 vs October 2025 (year over year), growth or "
+            "decline between periods, 'why did sales drop', 'what drove the increase' (use group_by on the "
+            "dimension to explain). The two ranges are parameters: never also put them in filters.",
+            (
+                Param("time_column", "column", "Date column that places rows in a period", required=True,
+                      column_types=(DATETIME,)),
+                Param("value_column", "column", "Numeric measure; omit when counting rows", column_types=(NUMERIC,)),
+                Param("aggregation", "enum", "sum, mean or count of rows", choices=("sum", "mean", "count"), default="sum"),
+                Param("current_start", "date", "First day of the current period", required=True),
+                Param("current_end", "date", "Day after the last day of the current period (exclusive)", required=True),
+                Param("previous_start", "date", "First day of the comparison period", required=True),
+                Param("previous_end", "date", "Day after the last day of the comparison period (exclusive)", required=True),
+                Param("group_by", "column", "Optional dimension to explain the change", column_types=(CATEGORICAL, ANY)),
             ),
         ),
         OperatorSpec(

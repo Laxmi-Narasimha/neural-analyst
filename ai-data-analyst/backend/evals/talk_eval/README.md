@@ -3,10 +3,11 @@
 Measures how often a question typed the way users type it gets the **right number**, end to end:
 upload → profile → `/api/v1/chat` → rule planner or LLM planner → validated plan → operators.
 
-- `datasets.py`: three seeded datasets (retail orders, SaaS accounts, HR export with abbreviated headers).
-- `cases.py`: 42 questions with answers computed **independently in pandas**: filters, synonyms,
-  relative dates, typos, Hinglish, rankings, comparisons, rates, counts, follow-ups, privacy, prompt
-  injection, and questions that must be declined.
+- `datasets.py`: four seeded datasets: retail orders, SaaS accounts, an HR export with abbreviated headers, and a daily P&L.
+- `cases.py`: 53 questions with answers computed **independently in pandas**: filters, synonyms,
+  relative dates, typos, Hinglish, rankings, comparisons, rates, counts, margins, shares, ratios,
+  period-over-period (explicit, relative, year over year, in progress), drivers of change,
+  follow-ups, privacy, prompt injection, and questions that must be declined.
 - `scoring.py`: checks the number (or top group, or every group) against the expected value. A
   case passes only when the right value is in the answer. A case marked "decline" passes only
   when nothing is computed.

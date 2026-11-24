@@ -4,6 +4,7 @@ from typing import Any
 
 from app.compute.operators.base import Operator
 from app.compute.operators.eda import P0_EDA_OPERATORS
+from app.compute.operators.derived import P0_DERIVED_OPERATORS
 from app.compute.operators.ml import P0_ML_OPERATORS
 from app.compute.operators.analytics import P0_ANALYTICS_OPERATORS
 from app.compute.operators.business import P0_BUSINESS_OPERATORS
@@ -29,6 +30,8 @@ class OperatorRegistry:
 def default_registry() -> OperatorRegistry:
     reg = OperatorRegistry()
     for op in P0_EDA_OPERATORS:
+        reg.register(op)
+    for op in P0_DERIVED_OPERATORS:
         reg.register(op)
     for op in P0_ML_OPERATORS:
         reg.register(op)

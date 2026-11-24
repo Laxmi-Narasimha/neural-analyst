@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import difflib
 import re
+from datetime import date
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -162,6 +163,17 @@ def _check_param(spec: OperatorSpec, p: Param, value: Any, schema: SchemaView, r
         if p.max is not None and number > p.max:
             number = p.max
         return number
+    if p.kind == "date":
+        text = str(value).strip()[:10]
+        if not _ISO_DATE.match(text):
+            result.issues.append(f"{label}: '{value}' must be a date as YYYY-MM-DD")
+            return None
+        try:
+            date.fromisoformat(text)
+        except ValueError:
+            result.issues.append(f"{label}: '{value}' is not a valid calendar date")
+            return None
+        return text
     if p.kind == "value":
         if isinstance(value, (list, dict)):
             result.issues.append(f"{label}: give a single value")
@@ -249,6 +261,21 @@ def validate_plan(steps: Any, schema: dict[str, Any] | None) -> ValidationResult
                     params["positive_value"] = bound
                     if note:
                         result.notes.append(note)
+        if op == "ratio" and params.get("numerator_column") and params.get("numerator_column") == params.get("denominator_column") \
+                and not params.get("subtract_column"):
+            result.issues.append("ratio: numerator and denominator are the same column, so the ratio is always 1")
+        if op == "period_compare":
+            if params.get("aggregation", "sum") != "count" and not params.get("value_column"):
+                result.issues.append("period_compare: give value_column, or aggregation 'count' to compare row counts")
+            if params.get("aggregation") == "count":
+                params.pop("value_column", None)
+            keys = ("current_start", "current_end", "previous_start", "previous_end")
+            if all(params.get(k) for k in keys):
+                cs, ce, ps, pe = (params[k] for k in keys)
+                if cs >= ce or ps >= pe:
+                    result.issues.append("period_compare: each period must start before it ends (ends are exclusive)")
+                elif max(cs, ps) < min(ce, pe):
+                    result.issues.append("period_compare: the two periods overlap")
         if op == "rate" and params.get("group_by") and params.get("group_by") == params.get("column"):
             result.issues.append("rate: group_by cannot be the outcome column")
         if op == "segment_summary" and params.get("sort_by", "count") != "count" and "value_column" not in params:

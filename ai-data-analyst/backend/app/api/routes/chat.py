@@ -7,7 +7,7 @@ import asyncio
 import os
 import re
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID, uuid4
 
@@ -198,6 +198,34 @@ class ConversationRepository:
 # ============================================================================
 # Chat Service
 # ============================================================================
+
+def _fmt_number(value: Any) -> str:
+    """Numbers as users read them: thousands separators, 2 decimals unless whole; missing -> n/a."""
+    if value is None or isinstance(value, bool):
+        return "n/a" if value is None else str(value)
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if v != v or v in (float("inf"), float("-inf")):
+        return "n/a"
+    if v == int(v) and abs(v) < 1e15:
+        return f"{int(v):,}"
+    return f"{v:,.2f}"
+
+
+def _dropped_label(condition: Any) -> str:
+    """How a rule-detected filter the planner dropped is named to the user."""
+    if not isinstance(condition, dict):
+        return ""
+    if condition.get("op") == "date":
+        start, end = condition.get("start"), condition.get("end")
+        return f"the date range {start or '…'} to {end or '…'}" if (start or end) else ""
+    value = condition.get("value")
+    if value is None or str(value).strip() == "":
+        return ""
+    return repr(value)
+
 
 class ChatService:
     """
@@ -1323,9 +1351,10 @@ class ChatService:
             # Written from the validated plan, never from the model's own wording.
             note = f"Interpreted your question as: {describe_plan(outcome.steps)}."
             if dropped:
-                note += " Not treated as filters: " + ", ".join(
-                    repr(c.get("value")) for c in dropped if isinstance(c, dict) and "value" in c
-                ) + "."
+                labels = [_dropped_label(c) for c in dropped]
+                labels = [x for x in labels if x]
+                if labels:
+                    note += " Not treated as filters: " + ", ".join(labels) + "."
             if outcome.notes:
                 note += " " + " ".join(outcome.notes)
             return outcome.steps, note
@@ -1579,15 +1608,6 @@ class ChatService:
             except Exception:
                 return "n/a"
 
-        def _fmt_number(value: Any) -> str:
-            try:
-                v = float(value)
-                if v == int(v) and abs(v) < 1e15:
-                    return f"{int(v):,}"
-                return f"{v:,.2f}"
-            except Exception:
-                return str(value) if value is not None else "n/a"
-
         sections: list[str] = []
 
         for r in results:
@@ -1595,7 +1615,81 @@ class ChatService:
             preview_rows, _ = _first_table_preview(r)
             summary = getattr(r, "summary", {}) or {}
 
-            if op == "rate" and preview_rows:
+            if op == "period_compare" and (preview_rows or summary.get("overall_current") is not None):
+                agg = summary.get("aggregation") or "sum"
+                what = ("**Number of rows**" if agg == "count" else
+                        f"{'Average' if agg == 'mean' else 'Total'} **{summary.get('value_column')}**")
+                def _last(day):
+                    try:
+                        return (date.fromisoformat(str(day)[:10]) - timedelta(days=1)).isoformat()
+                    except ValueError:
+                        return str(day)
+                cur = f"{summary['current_start']} to {_last(summary['current_end'])}"
+                prev = f"{summary['previous_start']} to {_last(summary['previous_end'])}"
+                def _chg(change, pct, sep=" ("):
+                    if change is None:
+                        return "n/a"
+                    text = ("+" if change > 0 else "") + _fmt_number(change)
+                    if pct is None:
+                        return text
+                    return text + f"{sep}{'+' if pct > 0 else ''}{pct:.2f}%" + (")" if sep == " (" else "")
+                sections.append(
+                    f"{what}, {cur} vs {prev}: {_fmt_number(summary.get('overall_current'))} vs "
+                    f"{_fmt_number(summary.get('overall_previous'))}, change "
+                    f"{_chg(summary.get('overall_change'), summary.get('overall_change_pct'))}.")
+                if summary.get("aligned_to_data"):
+                    sections.append(
+                        f"The current period is still in progress and the data runs to {_last(summary['current_end'])}, "
+                        f"so both periods are compared over the same number of days.")
+                if summary.get("data_ends"):
+                    sections.append(f"The data ends on {summary['data_ends']}, before the current period does; "
+                                    "days after that have no rows.")
+                if not summary.get("overall_previous_rows"):
+                    sections.append("No rows fall in the comparison period, so there is no meaningful % change.")
+                if not summary.get("overall_current_rows"):
+                    sections.append("No rows fall in the current period.")
+                if summary.get("group_by") and preview_rows:
+                    items = []
+                    for row in preview_rows[:8]:
+                        share = row.get("contribution_pct")
+                        if isinstance(share, (int, float)) and share == share:
+                            share = 0.0 if abs(share) < 0.05 else share
+                            tail = f"; {share:.1f}% of the total change"
+                        else:
+                            tail = ""
+                        items.append(f"- {row.get('group')}: {_fmt_number(row.get('previous'))} → "
+                                     f"{_fmt_number(row.get('current'))} ({_chg(row.get('change'), row.get('change_pct'), ', ')}{tail})")
+                    sections.append(f"Change by **{summary['group_by']}** (largest change first):\n" + "\n".join(items))
+                    if any(isinstance(r.get("contribution_pct"), (int, float)) and r["contribution_pct"] < 0 for r in preview_rows):
+                        sections.append("Contributions add up to 100% of the total change; groups that moved the other way have negative shares.")
+            elif op == "ratio" and preview_rows:
+                top = f"**{summary.get('numerator_column')}**"
+                if summary.get("subtract_column"):
+                    top = f"(**{summary.get('numerator_column')}** - **{summary['subtract_column']}**)"
+                label = f"Total {top} / total **{summary.get('denominator_column')}**"
+                unit = "%" if summary.get("as_percent") else ""
+                def _val(row):
+                    v = row.get("value")
+                    if v is None or (isinstance(v, float) and v != v):
+                        return "n/a (denominator is zero)"
+                    return f"{_fmt_number(v)}{unit}"
+                if summary.get("group_by"):
+                    items = [f"- {row.get('group')}: {_val(row)}" for row in preview_rows[:10]]
+                    sections.append(f"{label} by **{summary['group_by']}**:\n" + "\n".join(items))
+                else:
+                    sections.append(f"{label}: {_val(preview_rows[0])}.")
+                if summary.get("rows_excluded_missing"):
+                    sections.append(f"{_fmt_number(summary['rows_excluded_missing'])} rows with a missing value in these columns are left out.")
+            elif op == "share_of_total" and preview_rows:
+                what = f"**{summary['value_column']}**" if summary.get("value_column") else "rows"
+                items = [f"- {row.get('group')}: {row['share_pct']:.2f}% ({_fmt_number(row.get('value'))})"
+                         if isinstance(row.get("share_pct"), (int, float)) else f"- {row.get('group')}: n/a"
+                         for row in preview_rows[:10]]
+                sections.append(f"Share of {what} by **{summary['group_by']}** (total {_fmt_number(summary.get('total'))}):\n"
+                                + "\n".join(items))
+                if summary.get("negative_values"):
+                    sections.append("Some groups are negative, so shares do not read as parts of a whole.")
+            elif op == "rate" and preview_rows:
                 what = f"**{summary.get('column')}** = {summary.get('positive_value')}"
                 def _pct(row):
                     rate = row.get("rate")

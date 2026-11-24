@@ -44,10 +44,21 @@ Rules:
      op "in" [A, B]. This is a plan, not a clarification.
    - "X by Y" for an additive amount (sales, revenue, MRR, cost, units) means the sum per Y unless the
      user says average/typical/per order. "Per order", "ticket size", "order value" mean the mean of the
-     sales amount. Ranking questions ("which branch has the most ...") use segment_summary or a grouped
+     sales amount, unless the user names another statistic ("median ticket size" is the median). Ranking questions ("which branch has the most ...") use segment_summary or a grouped
      measure_aggregate with the matching statistic.
    - Never sum, average or rank by a column marked "identifier".
    - Trends over time: resample_aggregate; restrict the period with a date filter.
+   - One column divided by another (per unit, per seat, margin %, cost per order): the "ratio" operator.
+     Margin % = numerator revenue, subtract_column cost, denominator revenue, as_percent true.
+   - "Share / mix / % of total by X": share_of_total.
+   - Comparing two periods ("vs last month", "Q3 vs Q2", "year over year", "growth from A to B", "why did
+     X drop/rise", "what drove the change"): period_compare with explicit current and previous ranges
+     (ends exclusive). "This month vs last month" -> current = 1st of this month to TODAY+1 day, previous =
+     the whole last month (the operator cuts both to the same length if the data stops early). "Year over
+     year for October 2026" -> previous = October 2025. For "why"/"what drove" add group_by on the most
+     relevant dimension; up to 3 period_compare steps with different group_by are fine. The period
+     ranges are parameters: put no date filter on that column, and drop detected date filters that only
+     name the periods being compared.
    - Predicting an outcome: ml_train_baseline with that column as target_column.
 4. Row filters restrict which rows count (where region = West, in Q1 2026, excluding returns).
    ORIGINAL_MESSAGE is what the user typed. A rule parser already extracted DETECTED_FILTERS from it
@@ -149,6 +160,36 @@ def describe_columns(schema: dict[str, Any] | None) -> list[dict[str, Any]]:
                     item[dst] = _clip(c[src])
         out.append(item)
     return out
+
+
+def _dropped_dates_without_comparison(steps: list[dict[str, Any]], keep: list[int], detected: list[Any]) -> list[str]:
+    """Dates the parser found ("last month", "in Q1") are real restrictions unless the plan compares periods.
+
+    Measured: a model dropped "last month" from "how much did we sell online last month?" and answered
+    for all time. Only period_compare, which takes the periods as parameters, may drop them.
+    """
+    if any(s.get("operator") == "period_compare" for s in steps):
+        return []
+    dropped = [i for i, c in enumerate(detected) if i not in set(keep) and isinstance(c, dict) and c.get("op") == "date"]
+    if dropped:
+        return [f"detected filter {dropped[0]} is a date restriction from the question; keep it in "
+                "keep_detected_filters (only a period_compare plan replaces date filters)"]
+    return []
+
+
+def _period_filter_conflicts(steps: list[dict[str, Any]], filters: list[Any], kept: list[Any]) -> list[str]:
+    """A date filter on the column being compared would delete one of the two periods."""
+    from app.services.chat_scope import condition_leaves
+
+    columns = {s["params"].get("time_column") for s in steps if s.get("operator") == "period_compare"}
+    if not columns:
+        return []
+    leaves = condition_leaves([f for f in list(filters) + list(kept) if isinstance(f, dict)])
+    bad = [c for c in leaves if c.get("op") == "date" and (c.get("column") in columns or not c.get("column"))]
+    if bad:
+        return ["period_compare already selects both periods; remove the date filters on the compared date "
+                "column (drop them from keep_detected_filters and filters)"]
+    return []
 
 
 def _check_kept(keep: list[int], detected: list[Any], schema: dict[str, Any] | None) -> list[str]:
@@ -319,6 +360,11 @@ async def plan_question(
                     keep = sorted(set(keep_raw))
             if keep:
                 keep_issues += _check_kept(keep, (context or {}).get("detected_filters") or [], schema)
+            if keep is not None:
+                keep_issues += _dropped_dates_without_comparison(result.steps, keep, (context or {}).get("detected_filters") or [])
+            keep_issues += _period_filter_conflicts(
+                result.steps, filters, [d for i, d in enumerate((context or {}).get("detected_filters") or [])
+                                        if keep is None or i in keep])
             issues = result.issues + filter_issues + keep_issues
             if result.ok and not issues:
                 return PlannerOutcome(
@@ -368,6 +414,21 @@ def describe_step(step: dict[str, Any]) -> str:
     if op == "resample_aggregate":
         what = p.get("value_column") or "row count"
         return f"{_FREQ_LABEL.get(p.get('freq') or 'M', 'monthly')} {what} over {p.get('time_column')}"
+    if op == "ratio":
+        top = p.get("numerator_column")
+        if p.get("subtract_column"):
+            top = f"({top} - {p['subtract_column']})"
+        pct = " as a percent" if p.get("as_percent") else ""
+        return f"total {top} / total {p.get('denominator_column')}{pct}" + by
+    if op == "share_of_total":
+        what = p.get("value_column") or "rows"
+        return f"share of {what} by {p.get('group_by')}"
+    if op == "period_compare":
+        agg = {"sum": "total", "mean": "average", "count": "row count"}.get(p.get("aggregation") or "sum", "total")
+        what = "row count" if agg == "row count" else f"{agg} {p.get('value_column')}"
+        return (f"{what} from {p.get('current_start')} to {_last_day(p.get('current_end'))} vs "
+                f"{p.get('previous_start')} to {_last_day(p.get('previous_end'))}"
+                + (f", change by {p['group_by']}" if p.get("group_by") else ""))
     if op == "forecast_scan":
         return f"forecast of {p.get('value_column')} over {p.get('time_column')}"
     if op == "ml_train_baseline":
@@ -378,6 +439,15 @@ def describe_step(step: dict[str, Any]) -> str:
         return f"distribution of {p.get('column')}"
     spec = CATALOG.get(str(op))
     return (spec.description.rstrip(".").lower() if spec else str(op))
+
+
+def _last_day(end: Any) -> str:
+    """Ends are exclusive in plans; people read the last included day."""
+    try:
+        from datetime import date as _date, timedelta as _td
+        return (_date.fromisoformat(str(end)[:10]) - _td(days=1)).isoformat()
+    except (TypeError, ValueError):
+        return str(end)
 
 
 def describe_plan(steps: list[dict[str, Any]]) -> str:

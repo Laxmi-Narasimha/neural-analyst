@@ -19,7 +19,7 @@ from typing import Any
 
 import pandas as pd
 
-from evals.talk_eval.datasets import hr_people, retail_orders, saas_accounts
+from evals.talk_eval.datasets import PNL_LAST_DAY, hr_people, retail_orders, saas_accounts, store_pnl
 
 
 @dataclass
@@ -162,4 +162,59 @@ def build_cases(today: date | None = None) -> list[Case]:
              float(h.loc[h["Loc"] == "Pune", "CTC (INR)"].sum()), tags=("messy_headers", "filter")),
         Case("h_sales_attrition", "hr_people", ["attrition rate in sales"], "value", [sales_attr, sales_attr * 100],
              tags=("messy_headers", "rate", "stretch")),
+    ] + _derived_cases(today, r)
+
+
+def _change(frame: pd.DataFrame, col: str, cur: tuple, prev: tuple, group: str | None = None):
+    """(current, previous, change, change_pct) for [start, end) ranges, overall or per group."""
+    def window(lo, hi):
+        part = frame[(frame["_d"] >= pd.Timestamp(lo)) & (frame["_d"] < pd.Timestamp(hi))]
+        return part.groupby(group)[col].sum() if group else float(part[col].sum())
+    a, b = window(*cur), window(*prev)
+    change = a - b
+    return a, b, change, change / b * 100
+
+
+def _derived_cases(today: date, r: pd.DataFrame) -> list[Case]:
+    p = store_pnl()
+    p["_d"] = pd.to_datetime(p["Date"])
+    by_region = p.groupby("Region")[["Revenue", "Cost"]].sum()
+    margin = ((by_region["Revenue"] - by_region["Cost"]) / by_region["Revenue"] * 100).to_dict()
+    overall_margin = float((p["Revenue"].sum() - p["Cost"].sum()) / p["Revenue"].sum() * 100)
+    share = (p.groupby("Product Line")["Revenue"].sum() / p["Revenue"].sum() * 100).to_dict()
+    asp = float(p["Revenue"].sum() / p["Units"].sum())
+    _, _, oct_chg, oct_pct = _change(p, "Revenue", ("2026-10-01", "2026-11-01"), ("2026-09-01", "2026-10-01"))
+    _, _, yoy_chg, yoy_pct = _change(p, "Revenue", ("2026-10-01", "2026-11-01"), ("2025-10-01", "2025-11-01"))
+    _, _, q_chg, _ = _change(p, "Revenue", ("2026-07-01", "2026-10-01"), ("2026-04-01", "2026-07-01"), "Region")
+    lm0, lm1 = _month_bounds(today, 1)
+    pm0, _ = _month_bounds(today, 2)
+    _, _, lm_chg, lm_pct = _change(p, "Revenue", (lm0, lm1), (pm0, lm0))
+    # This month so far vs the same days of last month: the month is in progress and the data stops early.
+    tm0 = pd.Timestamp(today.replace(day=1))
+    cut = min(pd.Timestamp(today) + pd.Timedelta(days=1), pd.Timestamp(PNL_LAST_DAY) + pd.Timedelta(days=1))
+    days = cut - tm0
+    _, _, mtd_chg, mtd_pct = _change(p, "Units", (tm0, cut), (lm0, lm0 + days))
+    per_unit = (r.groupby("Branch")["Net Sales"].sum() / r.groupby("Branch")["Units"].sum()).to_dict()
+    channel_share = (r["Channel"].value_counts(normalize=True) * 100).to_dict()
+    return [
+        Case("p_margin_by_region", "store_pnl", ["gross margin % by region"], "groups", margin, tags=("ratio", "margin")),
+        Case("p_overall_margin", "store_pnl", ["what is our overall profit margin?"], "value", [overall_margin],
+             tags=("ratio", "margin")),
+        Case("p_asp", "store_pnl", ["average selling price per unit"], "value", [asp], tags=("ratio",)),
+        Case("p_share_product", "store_pnl", ["what share of revenue comes from each product line?"], "groups", share,
+             tags=("share",)),
+        Case("p_oct_vs_sep", "store_pnl", ["how did revenue change from September 2026 to October 2026?"], "value",
+             [oct_chg, oct_pct], tags=("period", "explicit_dates")),
+        Case("p_yoy_october", "store_pnl", ["revenue growth year over year for October 2026"], "value", [yoy_pct, yoy_chg],
+             tags=("period", "yoy")),
+        Case("p_drivers_q3", "store_pnl", ["which regions drove the change in revenue from Q2 2026 to Q3 2026?"], "groups",
+             {k: float(v) for k, v in q_chg.items()}, tags=("period", "drivers")),
+        Case("p_last_month_vs_prior", "store_pnl", ["revenue last month compared with the month before"], "value",
+             [lm_chg, lm_pct], tags=("period", "relative_date")),
+        Case("p_mtd_units", "store_pnl", ["units sold this month vs last month"], "value", [mtd_pct],
+             tags=("period", "in_progress")),
+        Case("r_sales_per_unit_by_branch", "retail_orders", ["net sales per unit by branch"], "groups", per_unit,
+             tags=("ratio",)),
+        Case("r_order_share_channel", "retail_orders", ["what percentage of orders come from each channel?"], "groups",
+             channel_share, tags=("share",)),
     ]
