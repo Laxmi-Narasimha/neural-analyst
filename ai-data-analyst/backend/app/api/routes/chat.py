@@ -238,6 +238,65 @@ def _training_quality_lines(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _scoring_lines(summary: dict[str, Any]) -> list[str]:
+    """A batch scoring result in the user's terms: what was predicted, and how far to trust it."""
+    rows = int(summary.get("rows_scored") or 0)
+    target = summary.get("target_column")
+    lines = [f"I scored **all {rows:,} rows** with your model **{summary.get('model_name')}** "
+             f"v{summary.get('model_version')} (predicts **{target}**)."]
+    ps = summary.get("prediction_summary") or {}
+    if ps.get("counts"):
+        total = sum(int(v) for v in ps["counts"].values()) or 1
+        mix = ", ".join(f"**{k}** {int(v):,} ({int(v) / total:.0%})"
+                        for k, v in sorted(ps["counts"].items(), key=lambda kv: -int(kv[1]))[:6])
+        lines.append(f"**Predictions:** {mix}.")
+    elif ps.get("mean") is not None:
+        lines.append(f"**Predictions:** average {_fmt_number(ps['mean'])}, from {_fmt_number(ps.get('min'))} "
+                     f"to {_fmt_number(ps.get('max'))}.")
+    thr = summary.get("decision_threshold") or {}
+    classes = summary.get("classes") or []
+    if thr.get("threshold") is not None and classes:
+        pos = classes[int(thr.get("positive_index") or 0)]
+        lines.append(f"**Decision cut-off:** a row is predicted **{pos}** when its probability is at least "
+                     f"{float(thr['threshold']):.3f}, the cut-off tuned at training. Sort by **probability_{pos}** "
+                     "to apply a different one.")
+    if summary.get("calibrated"):
+        lines.append("**Probabilities:** calibrated at training, so 0.30 means about 30 in 100 such rows.")
+    drift = summary.get("drift") or {}
+    if drift:
+        shifted = [c for c in drift.get("columns") or [] if c.get("level") in {"major", "moderate", "missing_column"}][:4]
+        detail = "; ".join(
+            f"{c['column']} " + (f"PSI {float(c['psi']):.2f}" if c.get("psi") is not None else "missing")
+            for c in shifted)
+        lines.append(f"**Drift check:** {drift.get('message')}" + (f" ({detail})" if detail else ""))
+    shift = summary.get("prediction_shift") or {}
+    if shift.get("kind") == "classes":
+        train, new = shift.get("training") or {}, shift.get("new") or {}
+        bits = ", ".join(f"{k} {float(train.get(k, 0)):.0%} → {float(v):.0%}" for k, v in new.items())
+        lines.append(f"**Prediction mix vs held-out rows at training:** {bits} (PSI {float(shift.get('psi') or 0):.2f}, "
+                     f"{shift.get('level')}).")
+    elif shift.get("kind") == "values":
+        lines.append(f"**Predictions vs training:** average {_fmt_number(shift.get('new_mean'))} here, "
+                     f"{_fmt_number(shift.get('training_mean'))} on held-out rows at training.")
+    real = summary.get("realised_performance") or {}
+    if real.get("accuracy") is not None:
+        ref = real.get("held_out_balanced_accuracy_at_training")
+        lines.append(f"**How it did here:** {target} is known for {int(real['rows_with_outcome']):,} rows: accuracy "
+                     f"{float(real['accuracy']):.1%}, balanced accuracy {float(real['balanced_accuracy']):.1%}"
+                     + (f" (held-out at training: {float(ref):.1%})" if ref is not None else "") + ".")
+    elif real.get("mae") is not None:
+        ref = real.get("held_out_mae_at_training")
+        lines.append(f"**How it did here:** {target} is known for {int(real['rows_with_outcome']):,} rows: mean absolute "
+                     f"error {_fmt_number(real['mae'])}" + (f" (held-out at training: {_fmt_number(ref)})" if ref is not None else "")
+                     + ".")
+    for w in [w for w in summary.get("warnings") or [] if w != drift.get("message")][:4]:
+        lines.append(f"⚠️ {w}")
+    lines.append(f"Every row with **{summary.get('prediction_column')}**"
+                 + (" and the probability columns" if classes else "")
+                 + " is in the **predictions** table artifact, ready to open or download.")
+    return lines
+
+
 def _fmt_number(value: Any) -> str:
     """Numbers as users read them: thousands separators, 2 decimals unless whole; missing -> n/a."""
     if value is None or isinstance(value, bool):
@@ -576,6 +635,8 @@ class ChatService:
             disk = None
             planner_note: str | None = None
             force_llm = False
+            # "with my fraud model" names a model, not a row filter: keep it away from the filter parser.
+            scope_message, model_ref = self._split_model_reference(effective_message)
             try:
                 if not effective_message.strip() and sheets:
                     edit = ScopeEdit("", [], [])
@@ -583,7 +644,7 @@ class ChatService:
                     edit = ScopeEdit(effective_message.strip(), [], [])
                 else:
                     try:
-                        edit = parse_scope(effective_message, schema, today=datetime.now(timezone.utc).date(), bindings=bindings)
+                        edit = parse_scope(scope_message, schema, today=datetime.now(timezone.utc).date(), bindings=bindings)
                     except ScopeQuestion as error:
                         # The rule parser could not read the restriction; the validated
                         # planner gets the whole message instead of the user getting a dead end.
@@ -593,6 +654,8 @@ class ChatService:
                         force_llm = True
                 if not edit.question and not edit.clear and not last and conv_ctx.get("turn_history") and plan is None:
                     raise ScopeQuestion("This older conversation has no saved calculation or filters. Restate the calculation with its conditions once to continue.")
+                if plan is None and model_ref is not None:
+                    plan = [{"operator": "ml_score", "params": {"model_hint": model_ref}}]
                 if plan is None:
                     if edit.question and not force_llm:
                         plan = self._select_plan(edit.question, dataset_record=dataset_record)
@@ -655,12 +718,16 @@ class ChatService:
                     await self._save_scope_context(conversation, {**conv_ctx, "pending_clarification": pending_new}, dataset_id=active_dataset_id)
                     return await self._scope_reply(conversation, active_dataset_id, pending_new["reason"], pending_new)
                 operator_names = [step["operator"] for step in plan]
+                scoring = "ml_score" in operator_names
+                if scoring and sheets and sheets != [catalog[0]["name"]]:
+                    raise ScopeQuestion("Scoring uses the dataset's first worksheet. Save the selected worksheet as its "
+                                        "own dataset to score it.")
                 gate = await self.subscription.assert_can_run(
                     self.user_id, action=UsageAction.TALK_PREVIEW, operators=operator_names,
                 )
                 if sheets and any(s["operator"] == "ml_train_baseline" for s in plan) and self._detect_ml_mode(effective_message) == "automl" and sheets != [catalog[0]["name"]]:
                     raise ScopeQuestion("Full AutoML jobs use the uploaded dataset’s first worksheet. Use a quick baseline to train on the selected worksheets.")
-                if sheets or await asyncio.to_thread(needs_scan, dataset_record):
+                if not scoring and (sheets or await asyncio.to_thread(needs_scan, dataset_record)):
                     try:
                         disk = await asyncio.to_thread(prepare_scan, dataset_record, edit, last.get("filters", []), plan, bindings)
                     except ScopeQuestion as error:
@@ -675,7 +742,8 @@ class ChatService:
                     loaded, conditions = disk.loaded, disk.filters
                     matched_rows = disk.rows if conditions else None
                 elif edit.conditions or (last.get("filters") and not edit.clear):
-                    loaded = await self.dataset_loader.load_dataset(active_dataset_id, owner_id=self.user_id)
+                    loaded = await (self._load_for_scoring(active_dataset_id) if scoring else
+                                    self.dataset_loader.load_dataset(active_dataset_id, owner_id=self.user_id))
                     if version and version != loaded.version_hash:
                         raise ScopeQuestion("The dataset changed while planning. Please retry on its current version.")
                     try:
@@ -696,8 +764,10 @@ class ChatService:
                             raise ScopeQuestion("This modeling workflow needs a versioned filtered dataset. Save the filtered rows as a dataset before training.")
                         loaded = await asyncio.to_thread(scoped_dataset, loaded, conditions)
                         matched_rows = len(loaded.df)
-                    else:
+                    elif not scoring:
                         loaded = None
+                if scoring and loaded is None:
+                    loaded = await self._load_for_scoring(active_dataset_id)
             except ScopeQuestion as error:
                 pending_new = None
                 if error.key and (error.choices or error.key in {"year", "fiscal_year"}):
@@ -780,7 +850,7 @@ class ChatService:
                 )
 
             sample_rows = 200_000
-            if conditions or "measure_aggregate" in operator_names:
+            if conditions or "measure_aggregate" in operator_names or "ml_score" in operator_names:
                 sample_rows = None
             elif {"ml_train_baseline", "ml_task_inference"}.intersection(operator_names):
                 sample_rows = settings.ml.chat_training_sample_rows
@@ -1120,6 +1190,36 @@ class ChatService:
                             )
                             return plan, pending
 
+            if op == "ml_score":
+                from app.services.ml_model_choice import choose_model
+
+                hint = str(params.pop("model_hint", "") or "")
+                outcome = choose_model(self.user_id, columns=schema_cols,
+                                       requested=str(params.get("model_name") or "").strip() or None,
+                                       message=f"{user_message} {hint}".strip())
+                choice = outcome.choice
+                if choice is None and outcome.options:
+                    # A model chosen earlier in this conversation settles a tie between fitting models.
+                    choice = next((m for m in outcome.options if m.name == pinned.get("model_name")), None)
+                if choice is None and outcome.options:
+                    pending = self._build_pending_clarification(
+                        dataset_id=str(getattr(dataset_record, "id", "") or ""),
+                        original_user_message=user_message,
+                        operator=op,
+                        param_key="model_name",
+                        options=[m.name for m in outcome.options],
+                        labels={m.name: m.label for m in outcome.options},
+                        reason=outcome.reason,
+                        plan_template=plan_out + [{"operator": op, "params": params}] + [
+                            s for s in plan[len(plan_out) + 1 :] if isinstance(s, dict)
+                        ],
+                    )
+                    return plan, pending
+                if choice is None:
+                    raise ScopeQuestion(outcome.reason)
+                params.update(model_name=choice.name, model_version=choice.version,
+                              model_fingerprint=choice.fingerprint)
+
             if op == "resample_aggregate":
                 time_col = str(params.get("time_column") or "").strip() or None
                 if time_col and time_col in schema_set:
@@ -1160,10 +1260,11 @@ class ChatService:
         options: list[str],
         reason: str,
         plan_template: list[dict[str, Any]],
+        labels: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         from uuid import uuid4
 
-        opts = [{"value": str(o), "label": str(o)} for o in options if o]
+        opts = [{"value": str(o), "label": str((labels or {}).get(o) or o)} for o in options if o]
         return {
             "question_id": uuid4().hex,
             "dataset_id": str(dataset_id),
@@ -1259,10 +1360,14 @@ class ChatService:
         if chosen is None:
             return None
 
-        # Validate column exists on dataset schema.
-        schema_set = {str(c.get("name") or "") for c in self._schema_columns(dataset_record) if c.get("name")}
-        if chosen not in schema_set:
-            return None
+        if param_key == "model_name":
+            # Re-bound against the owner's registry when the plan runs; nothing else to check here.
+            pass
+        else:
+            # Validate column exists on dataset schema.
+            schema_set = {str(c.get("name") or "") for c in self._schema_columns(dataset_record) if c.get("name")}
+            if chosen not in schema_set:
+                return None
 
         plan_raw = pending.get("plan") if isinstance(pending.get("plan"), list) else []
         plan_out: list[dict[str, Any]] = []
@@ -1277,6 +1382,52 @@ class ChatService:
             plan_out.append({"operator": op, "params": params})
 
         return {"plan": plan_out, "param_key": param_key, "value": chosen}
+
+    _SCORE_RE = re.compile(
+        r"\b(?:re)?score\s+(?:this|these|that|the|every|all|each|it|new|my|our)\b"
+        r"|\b(?:apply|run|use)\s+(?:my|our|the|that)\s+(?:[\w-]+\s+){0,3}model\b"
+        r"|\bwith\s+(?:my|our|the)\s+(?:saved\s+|trained\s+|existing\s+)?(?:[\w-]+\s+){0,3}model\b"
+        r"|\bbatch\s+(?:scor|predict)",
+        re.I,
+    )
+
+    _MODEL_REF_RE = re.compile(
+        r"\b(?:with|using|via|from)\s+(?:my|our|the|that|a)\s+(?:[\w-]+\s+){0,3}?model\b"
+        r"|\b(?:apply|run|use)\s+(?:my|our|the|that)\s+(?:[\w-]+\s+){0,3}?model\b(?:\s+(?:on|to|for)\b)?",
+        re.I,
+    )
+
+    def _split_model_reference(self, message: str) -> tuple[str, str | None]:
+        """(message for the filter parser, the words naming a model) when this is a scoring request."""
+        if not self._is_score_intent(message):
+            return message, None
+        refs: list[str] = []
+
+        def cut(match: re.Match) -> str:
+            refs.append(match[0])
+            return "score" if re.match(r"(?:apply|run|use)\b", match[0], re.I) else ""
+
+        text = self._MODEL_REF_RE.sub(cut, message)
+        try:
+            from app.ml.model_registry import get_model_registry
+
+            for name in sorted((m["name"] for m in get_model_registry(self.user_id).list_models()), key=len, reverse=True):
+                pattern = rf"\b(?:with|using)?\s*(?<![\w-]){re.escape(name)}(?![\w-])"
+                if re.search(pattern, text, re.I):
+                    refs.append(name)
+                    text = re.sub(pattern, "", text, flags=re.I)
+        except Exception:
+            pass
+        text = re.sub(r"\s{2,}", " ", text).strip()
+        text = re.sub(r"^score\s+score\b", "score", text, flags=re.I)
+        return text or "score this file", " ".join(refs)
+
+    def _is_score_intent(self, user_message: str) -> bool:
+        """Applying a saved model to this data, as opposed to training a new one."""
+        msg = user_message or ""
+        if re.search(r"\b(?:train|retrain|build|fit|create|tune)\b", msg, re.I):
+            return False
+        return bool(self._SCORE_RE.search(msg))
 
     def _is_ml_intent(self, user_message: str) -> bool:
         msg = (user_message or "").lower()
@@ -1341,6 +1492,18 @@ class ChatService:
                     return str(col.get("name"))
         return None
 
+    async def _load_for_scoring(self, dataset_id: UUID):
+        """Every row, up to the scoring cap; a larger file is refused rather than sampled."""
+        from app.services.ml_scoring_service import too_large_message
+
+        cap = int(settings.ml.max_scoring_rows)
+        try:
+            return await self.dataset_loader.load_dataset(dataset_id, owner_id=self.user_id, max_rows=cap)
+        except Exception as e:
+            if "too large" in str(e).lower():
+                raise ScopeQuestion(too_large_message(cap) + ". The scoring API takes the same limit.") from e
+            raise
+
     def _llm_can_recover(self, error: ScopeQuestion) -> bool:
         """A rule-stage refusal the planner may resolve: not a pending choice, and a model is configured."""
         from app.planning.llm_planner import planner_enabled
@@ -1351,6 +1514,17 @@ class ChatService:
             return bool(getattr(self.llm, "is_available", True))
         except Exception:
             return False
+
+    def _model_menu(self, schema: dict[str, Any]) -> list[dict[str, Any]]:
+        """The owner's saved models, so the planner can name one; code binds the choice later."""
+        from app.services.ml_model_choice import list_scoring_models
+
+        try:
+            cols = [str(c.get("name")) for c in (schema or {}).get("columns") or [] if isinstance(c, dict) and c.get("name")]
+            return [{"name": m.name, "predicts": m.target, "task": m.task, "fits_this_file": m.usable}
+                    for m in list_scoring_models(self.user_id, cols)[:20]]
+        except Exception:
+            return []
 
     async def _plan_with_llm(
         self, edit: ScopeEdit, original_message: str, schema: dict[str, Any], last: dict[str, Any]
@@ -1378,6 +1552,7 @@ class ChatService:
                 "detected_filters": list(edit.conditions),
                 "original_message": original_message,
                 "today": datetime.now(timezone.utc).date().isoformat(),
+                "models": self._model_menu(schema),
             },
         )
         if outcome.status == "plan":
@@ -1413,6 +1588,8 @@ class ChatService:
         msg_raw = user_message or ""
         if re.fullmatch(r"(?:count(?: of)?|total|how many|number of) (?:rows|records)", msg_raw.strip(" .!?"), re.I):
             return [{"operator": "dataset_overview", "params": {}}]
+        if self._is_score_intent(msg_raw):
+            return [{"operator": "ml_score", "params": {}}]
         if dataset_record is not None:
             schema = getattr(dataset_record, "schema_info", None)
             for question, step in starter_plans(schema).items():
@@ -1996,6 +2173,9 @@ class ChatService:
                 if sampled:
                     lines.append(f"Trained on **{int(sampled):,}** representative rows from your dataset.")
                 sections.append("\n".join(lines))
+
+            elif op == "ml_score" and summary.get("rows_scored") is not None:
+                sections.append("\n".join(_scoring_lines(summary)))
 
             elif op == "sentiment_scan" and preview_rows:
                 items = []

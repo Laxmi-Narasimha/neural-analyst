@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.schemas import APIResponse
 from app.api.routes.auth import get_current_user, require_permission
 from app.core.config import settings
+from app.ml.model_registry import validate_model_name
 from app.services.database import get_db_session
 from app.services.auth_service import AuthUser, Permission
 from app.services.job_service import JobService
@@ -81,8 +82,12 @@ class TrainModelRequest(BaseModel):
     )
 
     def evaluation_options(self) -> dict[str, Any]:
-        return {"time_column": self.time_column, "split": self.split, "test_start": self.test_start,
-                "balance_class_weights": bool(self.balance_class_weights)}
+        """Options a queued job needs to train exactly like a direct run (including the chosen name)."""
+        out = {"time_column": self.time_column, "split": self.split, "test_start": self.test_start,
+               "balance_class_weights": bool(self.balance_class_weights)}
+        if self.model_name:
+            out["model_name"] = self.model_name
+        return out
 
 
 class TrainModelResponse(BaseModel):
@@ -194,6 +199,11 @@ async def train_model(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid dataset_id")
 
     mode = str(request.mode or "baseline").strip().lower()
+    if request.model_name:
+        try:
+            request.model_name = validate_model_name(request.model_name)
+        except Exception as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
     service = MLTrainingService(db)
     subscription = SubscriptionService(db)
     await subscription.assert_can_run(user.user_id, action=UsageAction.ML_TRAIN)
@@ -249,6 +259,7 @@ async def train_model(
         split=request.split,
         test_start=request.test_start,
         balance_class_weights=request.balance_class_weights,
+        model_name=request.model_name,
     )
     return TrainModelResponse(
         status="completed",
@@ -326,13 +337,16 @@ async def score_dataset(
     from app.services.ml_scoring_service import MLScoringService
 
     model = _load_owned_model(user, model_name, request.version)
-    version = request.version or max(v["version"] for v in _registry(user).get_model_versions(model_name))
+    registry = _registry(user)
+    version = request.version or max(v["version"] for v in registry.get_model_versions(model_name))
+    tags = next((m.get("tags") for m in registry.list_models() if m["name"] == model_name), None)
     return await MLScoringService(db).score_dataset(
         owner_id=user.user_id,
         model=model,
         model_name=model_name,
         model_version=version,
         dataset_id=request.dataset_id,
+        model_tags=tags,
     )
 
 

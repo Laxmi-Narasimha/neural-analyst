@@ -55,7 +55,7 @@ def transform_dataset_task(dataset_id: str, job_id: str | None = None) -> None:
     asyncio.run(DatasetTransformService().run_transform(ds_id, j_id))
 
 
-_ML_OPTIONS = {"time_column", "split", "test_start", "balance_class_weights"}
+_ML_OPTIONS = {"time_column", "split", "test_start", "balance_class_weights", "model_name"}
 
 
 def _ml_options(raw: object) -> dict:

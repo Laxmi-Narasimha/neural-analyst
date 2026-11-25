@@ -136,7 +136,78 @@ class MLTrainBaselineOperator:
         )
 
 
+@dataclass(frozen=True)
+class MLScoreOperator:
+    """Score every row in scope with one of the owner's saved models, with drift and trust checks.
+
+    ``model_name`` and ``model_version`` are bound by code against the owner's registry before this
+    runs (see app.services.ml_model_choice); ``model_fingerprint`` only keys the result cache so a
+    retrained model never reuses old predictions.
+    """
+
+    name: str = "ml_score"
+
+    def run(self, ctx: OperatorContext, params: dict[str, Any]) -> OperatorResult:
+        from app.ml.model_registry import get_model_registry
+        from app.ml.scoring import score_frame, training_overlap_warning
+
+        if ctx.owner_id is None:
+            raise ValueError("Scoring needs a signed-in owner")
+        name = str(params.get("model_name") or "").strip()
+        if not name:
+            raise ValueError("model_name is required for ml_score")
+        registry = get_model_registry(ctx.owner_id)
+        info = next((m for m in registry.list_models() if m["name"] == name), None)
+        if info is None:
+            raise ValueError(f"Model '{name}' not found")
+        version = params.get("model_version")
+        version = int(version) if version not in (None, "") else int(info.get("production_version") or info["latest_version"])
+        bundle = registry.load_model(name, version=version)
+        scored = score_frame(bundle, ctx.df)
+        overlap = training_overlap_warning(info.get("tags"), dataset_id=ctx.dataset_id,
+                                           dataset_version=ctx.dataset_version, realised=scored.realised)
+        if overlap:
+            scored.warnings.append(overlap)
+
+        tables: dict[str, pd.DataFrame] = {"predictions": scored.table}
+        charts: dict[str, Any] = {}
+        drift_rows = (scored.drift or {}).get("columns") or []
+        if drift_rows:
+            tables["drift"] = pd.DataFrame([
+                {"column": r["column"], "level": r.get("level"), "psi": r.get("psi"), "note": r.get("note")}
+                for r in drift_rows
+            ])
+            psi = {r["column"]: float(r["psi"]) for r in drift_rows if r.get("psi") is not None}
+            if psi:
+                charts["drift"] = importance_bar_chart(
+                    psi, title="Drift from training data per input (PSI; 0.10 moderate, 0.25 major)")
+        training_info = getattr(bundle, "training_info", None) or {}
+        summary = {
+            "model_name": name,
+            "model_version": version,
+            "target_column": bundle.target_column,
+            "task": bundle.task,
+            "classes": list(bundle.classes) if bundle.classes is not None else None,
+            "decision_threshold": getattr(bundle, "decision_threshold", None),
+            "calibrated": bool(getattr(bundle, "calibrator", None)),
+            "held_out_metrics_at_training": training_info.get("model_test_metrics"),
+            **scored.summary(),
+        }
+        return OperatorResult(
+            tables=tables,
+            metrics={
+                "rows_scored": summary["rows_scored"],
+                "model_name": name,
+                "model_version": version,
+                "drift_verdict": (scored.drift or {}).get("verdict"),
+            },
+            charts=charts,
+            summary=summary,
+        )
+
+
 P0_ML_OPERATORS = [
     MLTaskInferenceOperator(),
     MLTrainBaselineOperator(),
+    MLScoreOperator(),
 ]

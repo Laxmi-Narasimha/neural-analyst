@@ -81,6 +81,7 @@ class MLTrainingService:
         split: str | None = None,
         test_start: str | None = None,
         balance_class_weights: bool = False,
+        model_name: str | None = None,
     ) -> dict[str, Any]:
         context = LogContext(component="MLTrainingService", operation="run_baseline_training")
         sample_rows = int(sample_rows or settings.ml.chat_training_sample_rows)
@@ -97,7 +98,7 @@ class MLTrainingService:
         run = run_training(
             df,
             target_column=target_column,
-            registered_name=f"ds_{str(dataset_id)[:8]}_{target_column}",
+            registered_name=model_name or f"ds_{str(dataset_id)[:8]}_{target_column}",
             owner_id=owner_id,
             task=task,
             optimize=optimize and trials > 0,
@@ -139,6 +140,7 @@ class MLTrainingService:
         split: str | None = None,
         test_start: str | None = None,
         balance_class_weights: bool = False,
+        model_name: str | None = None,
     ) -> None:
         context = LogContext(component="MLTrainingService", operation="run_automl_job")
         sample_rows = int(sample_rows or settings.ml.automl_training_sample_rows)
@@ -165,7 +167,7 @@ class MLTrainingService:
             run = run_training(
                 df,
                 target_column=target_column,
-                registered_name=f"ds_{str(dataset_id)[:8]}_{target_column}_automl",
+                registered_name=model_name or f"ds_{str(dataset_id)[:8]}_{target_column}_automl",
                 owner_id=owner_id,
                 task=task,
                 optimize=optimize,

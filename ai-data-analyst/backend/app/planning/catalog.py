@@ -10,6 +10,8 @@ dataset before anything runs:
 * ``date``    - an ISO calendar date, YYYY-MM-DD
 * ``value``   - a value of the column named by the operator's ``column`` parameter,
                 bound to the real values in the data by the validator
+* ``model``   - one of the user's saved models, bound against their own registry by
+                app.services.ml_model_choice before anything runs
 
 Only operators listed here can be planned. Their implementations live in
 app/compute/operators and are the only code that produces numbers.
@@ -30,7 +32,7 @@ ANY = "any"
 @dataclass(frozen=True)
 class Param:
     name: str
-    kind: str  # column | enum | int | bool | value | date
+    kind: str  # column | enum | int | bool | value | date | model
     description: str
     required: bool = False
     column_types: tuple[str, ...] = (ANY,)
@@ -286,6 +288,14 @@ CATALOG: dict[str, OperatorSpec] = {
                 Param("test_start", "date", "Backtest from this date: train on earlier rows, test on this date and later"),
                 Param("optimize", "bool", "Tune hyperparameters (slower)", default=False),
             ),
+        ),
+        OperatorSpec(
+            "ml_score",
+            "Score every row of this dataset with one of the user's saved models, with a drift check against "
+            "the training data and actual accuracy when the outcome is present.",
+            "Apply / run / use a saved or existing model on this data; score this file; batch predictions "
+            "from a model trained earlier. Not for training a new model.",
+            (Param("model_name", "model", "Name of one of the user's saved models, from MODELS"),),
         ),
     ]
 }

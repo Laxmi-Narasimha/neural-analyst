@@ -492,7 +492,9 @@ def verify_measurement(question: str, schema: dict, plan: list[dict]) -> None:
         head preview display schema snapshot first details ranked rank average mean totals total sum
         across breakdown break down percentile median populations privacy risk sample dataset field to your
         measures metric measure score returns calculate projections topk features comparison compare best
-        strongest automatically detect identify as trend id correlations field""".split())
+        strongest automatically detect identify as trend id correlations field
+        these those it each every new saved trained existing latest apply use rescore scoring scored predictions
+        predicted""".split())
     words = re.findall(r"[^\W\d_]+", text, flags=re.UNICODE)
     if any(word.casefold() not in known for word in words):
         raise ScopeQuestion("Part of the question is unbound. Name the measurement and put restrictions after ‘where’, ‘for’, or ‘during’.")
