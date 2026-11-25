@@ -1002,7 +1002,7 @@ class AdvancedAutoMLEngine:
                         self._calibrator = {"positive_index": pos, "map": calibrator}
                     cal_info["positive_class"] = str(self._classes[pos])
                     out["calibration"] = cal_info
-                    if (self._class_balance or {}).get("imbalanced") and y_oof.sum() >= 5:
+                    if (self._class_balance or {}).get("tune_threshold") and y_oof.sum() >= 5:
                         thr = ev.choose_threshold(y_oof, p_oof)
                         thr["positive_class"] = str(self._classes[pos])
                         thr["held_out_at_default_0_5"] = ev.scores_at_threshold(y_pos_test, p_test, 0.5)
@@ -1300,6 +1300,13 @@ class AdvancedAutoMLEngine:
         if not (pd.api.types.is_numeric_dtype(values) or pd.api.types.is_bool_dtype(values)):
             values = values.astype(str)
         classes = [_python_scalar(v) for v in sorted(pd.unique(values))]
+        if len(classes) == 2:
+            # The rarer class is the positive label (index 1), so every sklearn default that assumes
+            # pos_label=1 (PR AUC scoring, precision, recall, F1) is about the class users care about,
+            # e.g. 'fraud' (which sorts before 'ok') or 'Yes' churners.
+            counts = values.map(_python_scalar).value_counts()
+            if int(counts.get(classes[0], 0)) < int(counts.get(classes[1], 0)):
+                classes = [classes[1], classes[0]]
         mapping = {c: i for i, c in enumerate(classes)}
         self._classes = classes
         return values.map(lambda v: mapping[_python_scalar(v)]).to_numpy(dtype=int)
@@ -1614,12 +1621,16 @@ class AdvancedAutoMLEngine:
         X: pd.DataFrame,
         n_classes: int,
     ) -> Dict[str, float]:
+        # Two classes: precision/recall/F1 of the positive (rarer, index 1) class, the standard binary
+        # meaning. A weighted average would mostly report the common class and hide a model that
+        # misses the outcome. More classes: weighted averages.
+        average = "binary" if n_classes == 2 else "weighted"
         metrics = {
             "accuracy": float(accuracy_score(y_true, y_pred)),
             "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
-            "precision": float(precision_score(y_true, y_pred, average="weighted", zero_division=0)),
-            "recall": float(recall_score(y_true, y_pred, average="weighted", zero_division=0)),
-            "f1": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
+            "precision": float(precision_score(y_true, y_pred, average=average, zero_division=0)),
+            "recall": float(recall_score(y_true, y_pred, average=average, zero_division=0)),
+            "f1": float(f1_score(y_true, y_pred, average=average, zero_division=0)),
         }
         present = np.unique(y_true)
         if hasattr(model, "predict_proba") and len(present) >= 2:

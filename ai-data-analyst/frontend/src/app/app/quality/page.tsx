@@ -15,7 +15,7 @@ export default function DataQualityPage() {
                     Data Adequacy Analyst
                 </h1>
                 <p className="text-gray-400 mt-2">
-                    Evaluate your data's readiness for AI applications with comprehensive quality scoring.
+                    Evaluate your data&apos;s readiness for AI applications with comprehensive quality scoring.
                 </p>
             </header>
 

@@ -7,6 +7,7 @@ import { IconArrowRight, IconUpload, IconSparkles, IconChart, IconDatabase, Icon
 import ReactMarkdown from 'react-markdown';
 import api from '@/lib/api';
 import ChartArtifact, { extractChartsFromAgentActions } from '@/components/ChartArtifact';
+import { artifactLabel, keepLineBreaks } from '@/lib/labels';
 import styles from './page.module.css';
 
 function extractModelComparison(agentActions) {
@@ -137,10 +138,20 @@ export default function NewAnalysisPage() {
         setActiveDatasetId(datasetIdParam);
     }, [datasetIdParam]);
 
+    // Datasets the user can talk to, for the picker in the header.
+    const [datasetOptions, setDatasetOptions] = useState([]);
+    useEffect(() => {
+        let cancelled = false;
+        api.listDatasets(1, 100)
+            .then((res) => { if (!cancelled) setDatasetOptions((res.items || []).filter((d) => String(d.status || '').toLowerCase() === 'ready')); })
+            .catch(() => { if (!cancelled) setDatasetOptions([]); });
+        return () => { cancelled = true; };
+    }, [activeDatasetId]);
+
     const [messages, setMessages] = useState([
         {
             role: 'assistant',
-            content: datasetIdParam ? 'What would you like to investigate in this dataset?' : 'Upload a dataset or select one from Datasets to begin.'
+            content: datasetIdParam ? 'What would you like to investigate in this dataset?' : 'Choose a dataset above, or upload one with the button below, to begin.'
         }
     ]);
     const [input, setInput] = useState('');
@@ -546,9 +557,30 @@ export default function NewAnalysisPage() {
                 <div className={styles.chatHeader}>
                     <div className={styles.chatHeaderMain}>
                         <h1 className={styles.chatTitle}>Analysis chat</h1>
-                        {activeDatasetId && (
-                            <span className={styles.datasetBadge}>Dataset linked</span>
-                        )}
+                        <label className={styles.historyLabel} htmlFor="dataset-select">Dataset</label>
+                        <select
+                            id="dataset-select"
+                            className={styles.historySelect}
+                            value={activeDatasetId || ''}
+                            disabled={isLoading}
+                            onChange={(e) => {
+                                const id = e.target.value;
+                                setConversationId(null);
+                                setSheetSelection(null);
+                                setMessages([{
+                                    role: 'assistant',
+                                    content: id ? 'What would you like to investigate in this dataset?' : 'Upload a dataset or select one to begin.',
+                                }]);
+                                router.push(id ? `/app/analysis/new?dataset=${id}` : '/app/analysis/new');
+                            }}
+                        >
+                            <option value="">{datasetOptions.length ? 'Choose a dataset' : 'No datasets yet'}</option>
+                            {datasetOptions.map((d) => (
+                                <option key={d.id} value={d.id}>
+                                    {d.name}{d.row_count != null ? ` (${Number(d.row_count).toLocaleString()} rows)` : ''}
+                                </option>
+                            ))}
+                        </select>
                         {mlJobId && (
                             <span className={styles.mlJobBadge}>
                                 AutoML {mlJobStatus || 'running'}…
@@ -680,7 +712,7 @@ export default function NewAnalysisPage() {
                             <div className={styles.messageContent}>
                                 {message.role === 'assistant' ? (
                                     <div className={styles.markdown}>
-                                        <ReactMarkdown>{message.content || ''}</ReactMarkdown>
+                                        <ReactMarkdown>{keepLineBreaks(message.content)}</ReactMarkdown>
                                     </div>
                                 ) : (
                                     <div className={styles.messageText}>{message.content}</div>
@@ -730,7 +762,7 @@ export default function NewAnalysisPage() {
                                                 .filter(a => a.artifact_type === 'table' && a.artifact_id)
                                                 .map(a => (
                                                     <li key={a.artifact_id}>
-                                                        <Link href={`/app/artifacts/${a.artifact_id}`}>{a.name}</Link>
+                                                        <Link href={`/app/artifacts/${a.artifact_id}`}>{artifactLabel(a.name)}</Link>
                                                         {a.dataset_version && ` · dataset version ${a.dataset_version.slice(0, 12)}`}
                                                     </li>
                                                 )))}

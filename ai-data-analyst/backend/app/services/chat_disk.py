@@ -181,10 +181,11 @@ def _aggregate(con, op, p, fields, numeric, dates):
             rows["count"] = rows["count"].fillna(0).astype(int)
             if value:
                 rows["value_sum"] = rows["value_sum"].fillna(0)
-            rows.insert(0, "period", rows.index.to_timestamp(how="end").normalize().strftime("%Y-%m-%d %H:%M:%S"))
+            rows.insert(0, "period", rows.index.to_timestamp(how="end").normalize())
             rows.reset_index(drop=True, inplace=True)
-        return _result("resample", rows, {"time_column": time, "value_column": value, "freq": freq, "points": len(rows)},
-                       {"points": len(rows)})
+        from app.compute.operators.eda import finish_resample
+
+        return finish_resample(rows, freq, time_col=time, value_col=value)
     return None
 
 

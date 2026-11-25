@@ -2,6 +2,7 @@ import '@/styles/globals.css';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
 import FluidBackground from '@/components/effects/FluidBackground';
+import SiteChrome from '@/components/layout/SiteChrome';
 
 const PRIVATE_BETA = process.env.NEXT_PUBLIC_PRIVATE_BETA !== 'false';
 const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL
@@ -10,10 +11,10 @@ const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL
 export const metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
-    default: 'NeuralAnalyst - Private Beta',
+    default: 'NeuralAnalyst - Open-source AI data analyst',
     template: '%s | NeuralAnalyst',
   },
-  description: 'NeuralAnalyst helps invited beta users explore datasets and review evidence behind analytical results.',
+  description: 'Open-source AI data analyst: plain-language questions answered by validated plans and deterministic code, with the evidence shown.',
   keywords: [
     'AI data analyst',
     'machine learning',
@@ -48,8 +49,8 @@ export const metadata = {
     locale: 'en_US',
     url: SITE_URL,
     siteName: 'NeuralAnalyst',
-    title: 'NeuralAnalyst - Private Beta',
-    description: 'Explore datasets with traceable analytical results during our private beta.',
+    title: 'NeuralAnalyst - Open-source AI data analyst',
+    description: 'Ask questions of your data and check the evidence behind every answer.',
     images: [
       {
         url: '/og-image.png',
@@ -61,8 +62,8 @@ export const metadata = {
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'NeuralAnalyst - Private Beta',
-    description: 'Explore datasets with traceable analytical results during our private beta.',
+    title: 'NeuralAnalyst - Open-source AI data analyst',
+    description: 'Ask questions of your data and check the evidence behind every answer.',
     images: ['/twitter-image.png'],
   },
   alternates: {
@@ -85,7 +86,7 @@ const jsonLd = {
   name: 'NeuralAnalyst',
   applicationCategory: 'BusinessApplication',
   operatingSystem: 'Web',
-  description: 'Private beta for dataset exploration and evidence-backed analysis.',
+  description: 'Open-source AI data analyst with evidence-backed answers.',
 };
 
 export default function RootLayout({ children }) {
@@ -101,10 +102,9 @@ export default function RootLayout({ children }) {
         />
       </head>
       <body suppressHydrationWarning>
-        <FluidBackground />
-        <Header />
-        <main style={{ position: 'relative', zIndex: 1 }}>{children}</main>
-        <Footer />
+        <SiteChrome background={<FluidBackground />} header={<Header />} footer={<Footer />}>
+          {children}
+        </SiteChrome>
       </body>
     </html>
   );

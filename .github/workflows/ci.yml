@@ -32,6 +32,9 @@ jobs:
         run: |
           pytest -q
 
+      - name: Demo check (rule planner, no language model)
+        run: python -m demo check --no-llm
+
   frontend-build:
     runs-on: ubuntu-latest
     defaults:

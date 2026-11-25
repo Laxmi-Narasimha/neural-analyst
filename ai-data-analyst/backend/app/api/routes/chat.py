@@ -238,6 +238,35 @@ def _training_quality_lines(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
+_METRIC_NAMES = {"roc_auc": "ROC AUC", "average_precision": "PR AUC", "f1_macro": "macro F1", "f1_weighted": "weighted F1",
+                 "accuracy": "accuracy", "balanced_accuracy": "balanced accuracy", "r2": "R²",
+                 "neg_mean_absolute_error": "negative MAE", "neg_root_mean_squared_error": "negative RMSE"}
+
+
+def _held_out_line(summary: dict[str, Any]) -> str:
+    """Held-out results as a data scientist reads them: ranking quality, then the outcome class."""
+    m = {k: v for k, v in (summary.get("test_metrics") or {}).items() if v is not None}
+    classes = summary.get("classes") or []
+
+    def num(key: str, label: str, pct: bool = False) -> list[str]:
+        if key not in m:
+            return []
+        return [f"{label} {float(m[key]):.0%}" if pct else f"{label} {float(m[key]):.3f}"]
+
+    if len(classes) == 2:
+        positive = ((summary.get("decision_threshold") or {}).get("positive_class")) or classes[1]
+        head = num("roc_auc", "ROC AUC") + num("average_precision", "PR AUC") + num("balanced_accuracy", "balanced accuracy")
+        tail = num("precision", "precision", True) + num("recall", "recall", True)
+        text = "**Held-out results:** " + ", ".join(head)
+        return text + (f"; for **{positive}**: " + ", ".join(tail) if tail else "") + "."
+    if classes:
+        bits = num("accuracy", "accuracy") + num("balanced_accuracy", "balanced accuracy") + num("f1", "weighted F1") \
+            + num("roc_auc_ovr", "ROC AUC (one-vs-rest)")
+        return "**Held-out results:** " + ", ".join(bits) + "."
+    bits = num("r2", "R²") + [f"{label} {_fmt_number(m[key])}" for key, label in (("mae", "MAE"), ("rmse", "RMSE")) if key in m]
+    return "**Held-out results:** " + ", ".join(bits) + "."
+
+
 def _scoring_lines(summary: dict[str, Any]) -> list[str]:
     """A batch scoring result in the user's terms: what was predicted, and how far to trust it."""
     rows = int(summary.get("rows_scored") or 0)
@@ -717,6 +746,11 @@ class ChatService:
                     pending_new.update(original_user_message=effective_message, scope_bindings=bindings, dataset_version=version, worksheets=sheets)
                     await self._save_scope_context(conversation, {**conv_ctx, "pending_clarification": pending_new}, dataset_id=active_dataset_id)
                     return await self._scope_reply(conversation, active_dataset_id, pending_new["reason"], pending_new)
+                expanded = self._expand_drivers(plan, effective_message, dataset_record)
+                if expanded is not plan and planner_note:
+                    dims = ", ".join(str(s["params"]["group_by"]) for s in expanded)
+                    planner_note = re.sub(r", change by [^.;]+", f", change compared by {dims}", planner_note, count=1)
+                plan = expanded
                 operator_names = [step["operator"] for step in plan]
                 scoring = "ml_score" in operator_names
                 if scoring and sheets and sheets != [catalog[0]["name"]]:
@@ -1049,6 +1083,34 @@ class ChatService:
         if not isinstance(cols, list):
             return []
         return [c for c in cols if isinstance(c, dict)]
+
+    _WHY_RE = re.compile(r"\b(?:why|drove|drives|driver|drivers|caused|cause|explain|explains|behind|reason)\b", re.I)
+
+    def _expand_drivers(self, plan: list[dict[str, Any]], message: str, dataset_record: Any) -> list[dict[str, Any]]:
+        """'Why did sales drop': check every plausible dimension, not only the one the planner chose.
+
+        The planner names one group_by and its choice varies between runs; the answer must not. Code
+        compares the same two periods by up to four low-cardinality dimensions and the answer leads
+        with the one where the change is most concentrated.
+        """
+        steps = [s for s in plan if s.get("operator") == "period_compare"]
+        if not steps or len(steps) != len(plan) or not self._WHY_RE.search(message or ""):
+            return plan
+        base = dict(steps[0].get("params") or {})
+        if base.get("aggregation", "sum") not in {"sum", "count"}:
+            return plan  # contributions add up only for additive measures
+        used = [str(s["params"]["group_by"]) for s in steps if (s.get("params") or {}).get("group_by")]
+        by_name = {str(c.get("name")): c for c in self._schema_columns(dataset_record)}
+        candidates = [
+            c for c in self._column_candidates(dataset_record, kind="categorical")
+            if 2 <= int((by_name.get(c) or {}).get("unique_count") or 0) <= 20
+            and not (by_name.get(c) or {}).get("is_potential_pii")
+        ]
+        candidates.sort(key=lambda c: int((by_name.get(c) or {}).get("unique_count") or 0))
+        dims = list(dict.fromkeys(used + candidates))[:6]
+        if len(dims) < 2:
+            return plan
+        return [{"operator": "period_compare", "params": {**base, "group_by": d}} for d in dims]
 
     def _column_candidates(self, dataset_record: Any | None, *, kind: str) -> list[str]:
         cols = self._schema_columns(dataset_record)
@@ -1545,7 +1607,7 @@ class ChatService:
             edit.question,
             schema,
             llm=self.llm,
-            model=os.getenv("LLM_PLANNER_MODEL") or None,
+            model=os.getenv("LLM_PLANNER_MODEL") or settings.llm_planner_model or None,
             context={
                 "previous_steps": (last or {}).get("steps") or [],
                 "active_filters": (last or {}).get("filters") or [],
@@ -1564,7 +1626,9 @@ class ChatService:
             edit.conditions = list(edit.conditions) + list(outcome.filters)
             # Written from the validated plan, never from the model's own wording.
             note = f"Interpreted your question as: {describe_plan(outcome.steps)}."
-            if dropped:
+            # Only worth saying when nothing replaced them: typed filters or period parameters that
+            # re-express the same words are shown in the answer itself.
+            if dropped and not outcome.filters and not any(s.get("operator") == "period_compare" for s in outcome.steps):
                 labels = [_dropped_label(c) for c in dropped]
                 labels = [x for x in labels if x]
                 if labels:
@@ -1812,6 +1876,8 @@ class ChatService:
             for a in getattr(res, "artifacts", []):
                 if getattr(getattr(a, "artifact_type", None), "value", "") != "table":
                     continue
+                if str(getattr(a, "name", "")).endswith(":overall"):
+                    continue  # the grouped table is the evidence; the overall row is in the summary
                 preview = getattr(a, "preview", {}) or {}
                 pr = preview.get("preview_rows")
                 if isinstance(pr, list):
@@ -1826,8 +1892,51 @@ class ChatService:
 
         sections: list[str] = []
 
+        # Several period comparisons of the same periods by different dimensions ("why did X drop"):
+        # lead with the dimension where the change is most concentrated, summarise the rest.
+        driver_top, driver_skip, driver_note = None, set(), ""
+        compared = [r for r in results if getattr(r, "operator_name", "") == "period_compare"
+                    and (getattr(r, "summary", {}) or {}).get("group_by")]
+        if len(compared) >= 2:
+            def _concentration(res: Any) -> tuple[float, float, float, dict[str, Any]] | None:
+                # A group explains a change when its share of the change far exceeds its usual share of
+                # the measure: South being 22% of sales but 130% of the drop beats Online being 62% of
+                # sales and 130% of the drop. Rank by that excess.
+                rows, _ = _first_table_preview(res)
+                overall = (res.summary or {}).get("overall_change") or 0
+                base = (res.summary or {}).get("overall_previous") or 0
+                best = None
+                for row in rows:
+                    share, change, prev = row.get("contribution_pct"), row.get("change"), row.get("previous")
+                    if not (isinstance(share, (int, float)) and share == share and isinstance(change, (int, float))
+                            and isinstance(prev, (int, float)) and overall and base and (change > 0) == (overall > 0)):
+                        continue
+                    weight = prev / base * 100
+                    if best is None or share - weight > best[0]:
+                        best = (share - weight, float(share), weight, row)
+                return best
+
+            ranked = sorted(((c, res) for res in compared if (c := _concentration(res))), key=lambda x: -x[0][0])
+            if ranked:
+                (_, share, weight, row), top = ranked[0]
+                driver_top = id(top)
+                driver_skip = {id(res) for res in compared if id(res) != driver_top}
+                pct = row.get("change_pct")
+                driver_note = (f"**Where the change is concentrated:** {top.summary['group_by']} = **{row.get('group')}** "
+                               f"accounts for {share:.0f}% of the total change while it was {weight:.0f}% of the "
+                               f"comparison period" + (f" ({pct:+.1f}% in that group)" if isinstance(pct, (int, float)) else "")
+                               + ".")
+                others = []
+                for (_, o_share, o_weight, o_row), res in ranked[1:]:
+                    others.append(f"{res.summary['group_by']} ({o_row.get('group')}: {o_share:.0f}% of the change, "
+                                  f"{o_weight:.0f}% of the base)")
+                if others:
+                    driver_note += " Also checked, less concentrated: " + ", ".join(others) + "."
+
         for r in results:
             op = str(getattr(r, "operator_name", "") or "")
+            if id(r) in driver_skip:
+                continue
             preview_rows, _ = _first_table_preview(r)
             summary = getattr(r, "summary", {}) or {}
 
@@ -1864,6 +1973,8 @@ class ChatService:
                     sections.append("No rows fall in the comparison period, so there is no meaningful % change.")
                 if not summary.get("overall_current_rows"):
                     sections.append("No rows fall in the current period.")
+                if driver_note and id(r) == driver_top:
+                    sections.append(driver_note)
                 if summary.get("group_by") and preview_rows:
                     items = []
                     for row in preview_rows[:8]:
@@ -1928,8 +2039,9 @@ class ChatService:
                 else:
                     label = f"{str(agg).title()} of **{summary['value_column']}**"
                 if summary.get("group_by"):
-                    items = [f"- {row.get('group')}: {_fmt_number(row.get('value'))}" for row in preview_rows[:5]]
-                    sections.append(f"{label} by **{summary['group_by']}** (first groups):\n" + "\n".join(items))
+                    items = [f"- {row.get('group')}: {_fmt_number(row.get('value'))}" for row in preview_rows[:10]]
+                    more = "\nShowing 10 groups; the full table is attached below." if len(preview_rows) > 10 else ""
+                    sections.append(f"{label} by **{summary['group_by']}**:\n" + "\n".join(items) + more)
                 else:
                     sections.append(f"{label}: {_fmt_number(preview_rows[0].get('value'))}.")
             elif op == "dataset_overview" and preview_rows:
@@ -2053,10 +2165,36 @@ class ChatService:
                 if value_col:
                     desc += f" for **{value_col}**"
                 items = []
-                for row in preview_rows[:5]:
-                    if not isinstance(row, dict):
-                        continue
-                    items.append(f"  \u2022 {row.get('period')}: count = {_fmt_number(row.get('count'))}, sum = {_fmt_number(row.get('value_sum'))}")
+                if summary.get("highest"):
+                    unit = "" if summary.get("measure") == "value_sum" else " rows"
+                    points = int(summary.get("points") or 0)
+                    span = {"D": "day", "W": "week", "M": "month", "Q": "quarter", "Y": "year"}.get(freq or "", "period")
+                    what = f"total **{value_col}**" if summary.get("measure") == "value_sum" else "the number of rows"
+                    desc = (f"{freq_label.capitalize()} trend of {what} by **{time_col}**, {summary['first_label']} to "
+                            f"{summary['last_label']} ({points} {span}{'' if points == 1 else 's'})")
+                    hi, lo = summary["highest"], summary["lowest"]
+                    if points <= 1:
+                        items.append(f"- Only one {span} has data, so there is no trend yet: **{hi['label']}**, "
+                                     f"{_fmt_number(hi['value'])}{unit}.")
+                    else:
+                        items.append(f"- Highest: **{hi['label']}** ({_fmt_number(hi['value'])}{unit}); "
+                                     f"lowest: **{lo['label']}** ({_fmt_number(lo['value'])}{unit}).")
+                    ye = summary.get("year_earlier")
+                    if points <= 1:
+                        pass
+                    elif ye:
+                        sign = "+" if ye["change_pct"] >= 0 else ""
+                        items.append(f"- Latest, **{summary['last_label']}**: {_fmt_number(summary['last_value'])}{unit}, "
+                                     f"vs {_fmt_number(ye['value'])} in {ye['label']} ({sign}{ye['change_pct']:.1f}% year over year).")
+                    else:
+                        items.append(f"- Latest, **{summary['last_label']}**: {_fmt_number(summary['last_value'])}{unit}.")
+                    items.append("The chart and the full table are attached below.")
+                else:
+                    for row in preview_rows[:5]:
+                        if not isinstance(row, dict):
+                            continue
+                        items.append(f"  \u2022 {row.get('label') or row.get('period')}: count = {_fmt_number(row.get('count'))}, "
+                                     f"sum = {_fmt_number(row.get('value_sum'))}")
                 if items:
                     sections.append(f"{desc}:\n" + "\n".join(items))
 
@@ -2110,9 +2248,13 @@ class ChatService:
                 registered = summary.get("registered_model") if isinstance(summary, dict) else None
                 summary = summary if isinstance(summary, dict) else {}
                 best_display = summary.get("best_model_display") or best
-                scoring = summary.get("cv_scoring") or "score"
+                scoring = _METRIC_NAMES.get(str(summary.get("cv_scoring") or ""), summary.get("cv_scoring") or "score")
+                task_text = {"binary_classification": "two possible outcomes",
+                             "multiclass_classification": "several categories",
+                             "regression": "a number"}.get(str(task), str(task))
+                compared = len([m for m in summary.get("models") or [] if not m.get("is_baseline")])
                 lines = [
-                    f"I trained and compared models to predict **{target}** ({task}).",
+                    f"I trained and compared {compared or 'several'} models to predict **{target}** ({task_text}).",
                     f"**Best model:** {best_display}",
                 ]
                 split = summary.get("split") if isinstance(summary.get("split"), dict) else {}
@@ -2120,7 +2262,7 @@ class ChatService:
                     test_period = split.get("test_period") or ["?", "?"]
                     lines.append(
                         f"**Evaluation:** trained on earlier rows, tested on the {int(split.get('test_rows') or 0):,} "
-                        f"most recent by **{split.get('time_column')}** ({test_period[0]} to {test_period[1]})."
+                        f"most recent by **{split.get('time_column')}** ({str(test_period[0])[:10]} to {str(test_period[1])[:10]})."
                     )
                 elif split:
                     lines.append(
@@ -2128,7 +2270,7 @@ class ChatService:
                         "never seen during training or model selection."
                     )
                 if cv_mean is not None:
-                    lines.append(f"**Cross-validation {scoring}:** {float(cv_mean):.4f}")
+                    lines.append(f"**Cross-validated {scoring}** on the training rows: {float(cv_mean):.3f}")
                 else:
                     lines.append("**Cross-validation:** could not be computed, so this model is unvalidated.")
                 baseline = summary.get("baseline") if isinstance(summary.get("baseline"), dict) else {}
@@ -2138,13 +2280,10 @@ class ChatService:
                         "beats it" if verdict else "does **not** meaningfully beat it" if verdict is False else "compared"
                     )
                     lines.append(
-                        f"**Naive baseline {scoring}:** {float(baseline['cv_mean']):.4f}; the best model {verdict_text}."
+                        f"**Naive baseline** (no learning) {scoring}: {float(baseline['cv_mean']):.3f}; the best model {verdict_text}."
                     )
                 if isinstance(metrics, dict) and metrics:
-                    metric_bits = [
-                        f"{k}={float(v):.4f}" for k, v in list(metrics.items())[:4] if v is not None
-                    ]
-                    lines.append(f"**Held-out metrics:** {', '.join(metric_bits)}")
+                    lines.append(_held_out_line(summary))
                 lines.extend(_training_quality_lines(summary))
                 leaky = summary.get("excluded_leaky_columns") or []
                 if leaky:
@@ -2160,14 +2299,16 @@ class ChatService:
                 importance = summary.get("feature_importance") or {}
                 if isinstance(importance, dict) and importance:
                     top_feats = [(k, v) for k, v in importance.items() if v is not None][:5]
-                    feat_lines = [f"  • **{k}**: {float(v):.4f}" for k, v in top_feats]
+                    feat_lines = [f"- **{k}**: {float(v):.4f}" for k, v in top_feats]
                     lines.append(
                         f"**Most influential columns** (drop in {scoring} when shuffled on held-out rows):\n"
                         + "\n".join(feat_lines)
                     )
                 shown = ("Excluded columns that give away", "Predictions use a cut-off", "The model is clearly worse",
-                         "The rarer class is under", "At least one class is under")
-                for w in [w for w in (summary.get("warnings") or []) if not str(w).startswith(shown)][:4]:
+                         "The rarer class is under", "At least one class is under", "Evaluated on the most recent rows")
+                said = ("was taken as the moment a prediction is made",)
+                for w in [w for w in (summary.get("warnings") or [])
+                          if not str(w).startswith(shown) and not any(s in str(w) for s in said)][:4]:
                     lines.append(f"⚠️ {w}")
                 sampled = summary.get("sample_rows")
                 if sampled:

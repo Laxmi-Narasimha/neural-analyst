@@ -100,7 +100,7 @@ export default function SettingsPage() {
             {billingNotice && <p className={styles.noticeText}>{billingNotice}</p>}
 
             <div className={styles.tabs}>
-                {tabs.map((tab) => (
+                {tabs.filter((tab) => tab.id !== 'billing' || (subscription?.deployment_mode && subscription.deployment_mode !== 'self_host')).map((tab) => (
                     <button
                         key={tab.id}
                         className={`${styles.tab} ${activeTab === tab.id ? styles.active : ''}`}

@@ -12,6 +12,13 @@ from app.ml.training_run import run_training
 from app.services.ml_task_inference import infer_target_candidates
 
 
+def _model_name(ctx: OperatorContext, target: str) -> str:
+    """A name people can say back in chat: 'churned (customer_churn)'. Retraining on the same data
+    adds a version to the same model."""
+    name = " ".join(str(ctx.dataset_name or "").split())[:80]
+    return f"{target} ({name})" if name else f"ds_{str(ctx.dataset_id)[:8]}_{target}"
+
+
 @dataclass(frozen=True)
 class MLTaskInferenceOperator:
     name: str = "ml_task_inference"
@@ -85,7 +92,7 @@ class MLTrainBaselineOperator:
         run = run_training(
             ctx.df,
             target_column=target,
-            registered_name=f"ds_{str(ctx.dataset_id)[:8]}_{target}",
+            registered_name=_model_name(ctx, target),
             owner_id=ctx.owner_id,
             task=params.get("task"),
             optimize=optimize and trials > 0,
@@ -179,8 +186,12 @@ class MLScoreOperator:
             ])
             psi = {r["column"]: float(r["psi"]) for r in drift_rows if r.get("psi") is not None}
             if psi:
-                charts["drift"] = importance_bar_chart(
-                    psi, title="Drift from training data per input (PSI; 0.10 moderate, 0.25 major)")
+                from app.compute.chart_helpers import build_chart
+                from app.ml.visualization import ChartType
+
+                bars = pd.DataFrame(sorted(psi.items(), key=lambda kv: -kv[1]), columns=["input", "PSI"])
+                charts["drift"] = build_chart(bars, chart_type=ChartType.BAR, x="input", y="PSI",
+                                              title="Drift from training data per input (PSI; 0.10 moderate, 0.25 major)")
         training_info = getattr(bundle, "training_info", None) or {}
         summary = {
             "model_name": name,

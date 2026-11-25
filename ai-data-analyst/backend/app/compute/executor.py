@@ -26,6 +26,10 @@ from app.utils.hashing import hash_json
 logger = get_logger(__name__)
 
 
+# See _params_with_runtime_meta.
+RESULT_FORMAT_VERSION = 2
+
+
 @dataclass(frozen=True)
 class ExecutionResult:
     operator_name: str
@@ -59,6 +63,9 @@ class ComputeExecutor:
             "sample_rows": int(sample_rows) if sample_rows is not None else None,
             "max_rows": int(max_rows) if max_rows is not None else None,
             "app_version": str(settings.app_version),
+            # Bump when an operator's output (tables, summary fields) changes, so cached results
+            # computed by older code are never served after an upgrade.
+            "result_format": RESULT_FORMAT_VERSION,
         }
         return out
 
@@ -125,7 +132,9 @@ class ComputeExecutor:
             except Exception:
                 return None
 
-        artifacts = [self._artifact_row_to_ref(latest[k]) for k in sorted(latest)]
+        # Same order as a fresh run (the order they were written); answers read the first table.
+        ordered = sorted(latest.values(), key=lambda a: (str(a.created_at or ""), a.name))
+        artifacts = [self._artifact_row_to_ref(a) for a in ordered]
 
         summary: dict[str, Any] = {}
         for a in latest.values():
@@ -222,6 +231,7 @@ class ComputeExecutor:
             source_file_path=str(loaded.file_path or "") or None,
             source_file_format=str(loaded.file_format or "") or None,
             owner_id=owner_id,
+            dataset_name=getattr(loaded, "dataset_name", None),
         )
 
         def _run_sync():

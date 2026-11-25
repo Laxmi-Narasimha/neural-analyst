@@ -494,6 +494,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LLM_MODEL", "DEFAULT_LLM_MODEL"),
         description="LLM model to use (e.g., gpt-4o, claude-sonnet-4-20250514, ollama/llama3)",
     )
+    llm_planner_model: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("LLM_PLANNER_MODEL"),
+        description="Model for the question planner; defaults to LLM_MODEL. Read from .env as well as the environment.",
+    )
 
     # Vector store
     vector_store: VectorStoreBackend = Field(

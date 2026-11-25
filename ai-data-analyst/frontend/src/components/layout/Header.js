@@ -6,8 +6,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import styles from './Header.module.css';
 
 const PRIVATE_BETA = process.env.NEXT_PUBLIC_PRIVATE_BETA !== 'false';
+import { REPO_URL } from '@/lib/site';
 const navLinks = PRIVATE_BETA ? [
-    { href: '/pricing', label: 'Private beta' },
+    { href: REPO_URL, label: 'GitHub' },
 ] : [
     { href: '/features', label: 'Features' },
     { href: '/solutions', label: 'Solutions' },
@@ -49,8 +50,8 @@ export default function Header() {
                     <Link href="/login" className={styles.loginBtn}>
                         Log in
                     </Link>
-                    <Link href="/register" className={styles.startBtn}>
-                        {PRIVATE_BETA ? 'Use invite code' : 'Get started'}
+                    <Link href={PRIVATE_BETA ? '/app/datasets' : '/register'} className={styles.startBtn}>
+                        {PRIVATE_BETA ? 'Open the app' : 'Get started'}
                     </Link>
                 </div>
 
@@ -87,11 +88,11 @@ export default function Header() {
                             ))}
                             <li>
                                 <Link
-                                    href="/register"
+                                    href={PRIVATE_BETA ? '/app/datasets' : '/register'}
                                     className={styles.mobileStartBtn}
                                     onClick={() => setMobileOpen(false)}
                                 >
-                                    {PRIVATE_BETA ? 'Use invite code' : 'Get started'}
+                                    {PRIVATE_BETA ? 'Open the app' : 'Get started'}
                                 </Link>
                             </li>
                         </ul>

@@ -70,7 +70,11 @@ def starter_plans(schema: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
         if c.get("inferred_type") in {"string", "categorical", "boolean"}
         and 2 <= (c.get("unique_count") or 0) <= 50 and not c.get("is_unique_identifier")
     ), None)
-    measure = next((c["name"] for c in usable if _is_measure(c) and (c.get("unique_count") or 0) > 1), None)
+    measures = [c for c in usable if _is_measure(c) and (c.get("unique_count") or 0) > 1]
+    # Lead with the column people usually ask about (Sales, Revenue, Amount) over counts like Units.
+    money = re.compile(r"sales|revenue|amount|profit|price|spend|income|value|cost|charge|total", re.I)
+    measures.sort(key=lambda c: 0 if money.search(c["name"]) else 1)
+    measure = measures[0]["name"] if measures else None
     date = next((
         c["name"] for c in usable
         if c.get("inferred_type") in {"date", "datetime"} and (c.get("unique_count") or 0) > 1

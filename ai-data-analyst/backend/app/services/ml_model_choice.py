@@ -55,6 +55,11 @@ def _tokens(text: Any) -> set[str]:
     return {t for t in re.findall(r"[a-z0-9]+", str(text or "").casefold()) if len(t) >= 3 and t not in _GENERIC}
 
 
+def _related(a: set[str], b: set[str]) -> bool:
+    """'churn' names a model predicting 'churned': same word, or one is a 4+ letter prefix of the other."""
+    return any(x == y or (min(len(x), len(y)) >= 4 and (x.startswith(y) or y.startswith(x))) for x in a for y in b)
+
+
 def list_scoring_models(owner_id: Any, columns: list[str]) -> list[ModelChoice]:
     """The owner's models with the version that would score (production if set, else the latest)."""
     registry = get_model_registry(owner_id)
@@ -101,7 +106,7 @@ def choose_model(owner_id: Any, *, columns: list[str], requested: Optional[str] 
             f"None of your models can score this file. The closest, {closest.name} (predicts {closest.target}), "
             f"needs columns this file lacks: {', '.join(closest.missing[:8])}."))
     words = _tokens(text)
-    by_target = [m for m in usable if _tokens(m.target) & words]
+    by_target = [m for m in usable if _related(_tokens(m.target) | _tokens(m.name), words)]
     pool = by_target or usable
     if len(pool) == 1:
         return ChoiceOutcome(choice=pool[0])

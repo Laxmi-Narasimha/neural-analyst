@@ -19,6 +19,15 @@ from app.services.ml_task_inference import infer_target_candidates
 logger = get_logger(__name__)
 
 
+
+def _default_model_name(record: Any, dataset_id: UUID, target: str, kind: str = "") -> str:
+    """Readable and stable: 'churned (customer_churn)', so it can be named in chat later."""
+    name = " ".join(str(getattr(record, "name", "") or "").split())[:80]
+    if not name:
+        return f"ds_{str(dataset_id)[:8]}_{target}" + ("_automl" if kind else "")
+    return f"{target} ({name}{', ' + kind if kind else ''})"
+
+
 class MLTrainingService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -98,7 +107,7 @@ class MLTrainingService:
         run = run_training(
             df,
             target_column=target_column,
-            registered_name=model_name or f"ds_{str(dataset_id)[:8]}_{target_column}",
+            registered_name=model_name or _default_model_name(record, dataset_id, target_column),
             owner_id=owner_id,
             task=task,
             optimize=optimize and trials > 0,
@@ -167,7 +176,7 @@ class MLTrainingService:
             run = run_training(
                 df,
                 target_column=target_column,
-                registered_name=model_name or f"ds_{str(dataset_id)[:8]}_{target_column}_automl",
+                registered_name=model_name or _default_model_name(record, dataset_id, target_column, "AutoML"),
                 owner_id=owner_id,
                 task=task,
                 optimize=optimize,

@@ -33,6 +33,7 @@ from sklearn.metrics import brier_score_loss, f1_score, precision_score, recall_
 from sklearn.model_selection import KFold
 
 IMBALANCE_SHARE = 0.20
+THRESHOLD_TUNING_SHARE = 0.40
 MULTICLASS_IMBALANCE_SHARE = 0.10
 
 
@@ -53,6 +54,10 @@ def class_balance(y: np.ndarray, n_classes: int) -> dict[str, Any]:
         "minority_class_index": minority,
         "minority_share": float(shares[minority]),
         "imbalanced": imbalanced,
+        # A 0.5 cut-off under-predicts any clearly rarer outcome (a 21% churn rate is typical), so the
+        # cut-off is tuned on training folds whenever the rarer class is under 40%, not only when the
+        # model selection metric changes (under 20%).
+        "tune_threshold": bool(n_classes == 2 and shares[minority] < THRESHOLD_TUNING_SHARE),
     }
 
 

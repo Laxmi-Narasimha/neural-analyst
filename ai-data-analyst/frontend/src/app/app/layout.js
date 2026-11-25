@@ -5,9 +5,9 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import {
     IconDashboard, IconDatabase, IconChart, IconSettings,
-    IconPlus, IconSearch, IconUser, IconArrowRight, IconServer, IconShield, IconSparkles, IconTime, IconBook
+    IconPlus, IconSearch, IconUser, IconArrowRight, IconServer, IconSparkles, IconTime, IconBook
 } from '@/components/icons';
-import { clearTokens, getAccessToken } from '@/lib/auth';
+import { clearTokens } from '@/lib/auth';
 import api from '@/lib/api';
 import styles from './layout.module.css';
 
@@ -19,7 +19,7 @@ const navItems = [
     { href: '/app/data-speaks', label: 'Data Speaks', Icon: IconSparkles },
     { href: '/app/jobs', label: 'Jobs', Icon: IconTime },
     { href: '/app/reports', label: 'Reports', Icon: IconBook },
-    { href: '/app/quality', label: 'Data Adequacy', Icon: IconShield },
+    // Data Adequacy (/app/quality) is left out of the menu until its page is restyled without Tailwind.
     { href: '/app/settings', label: 'Settings', Icon: IconSettings },
 ];
 
@@ -31,18 +31,29 @@ export default function AppLayout({ children }) {
     const [userMenuOpen, setUserMenuOpen] = useState(false);
     const [currentUser, setCurrentUser] = useState(null);
     const [loggingOut, setLoggingOut] = useState(false);
+    const [backendError, setBackendError] = useState(null);
+    const [attempt, setAttempt] = useState(0);
 
     useEffect(() => {
-        const token = getAccessToken();
-        if (!token) {
-            router.replace('/login');
-            return;
-        }
-        setAuthReady(true);
+        // The backend decides who is signed in: local mode needs no login, JWT mode needs a token.
+        let cancelled = false;
+        setBackendError(null);
         api.getCurrentUser()
-            .then((res) => setCurrentUser(res?.data || res))
-            .catch(() => setCurrentUser(null));
-    }, [router]);
+            .then((res) => {
+                if (cancelled) return;
+                setCurrentUser(res?.data || res);
+                setAuthReady(true);
+            })
+            .catch((err) => {
+                if (cancelled) return;
+                if (err?.status === 401 || err?.status === 403) {
+                    router.replace('/login');
+                } else {
+                    setBackendError(err?.message || 'The backend did not answer');
+                }
+            });
+        return () => { cancelled = true; };
+    }, [router, attempt]);
 
     const handleLogout = async () => {
         setLoggingOut(true);
@@ -56,6 +67,20 @@ export default function AppLayout({ children }) {
             router.replace('/login');
         }
     };
+
+    if (backendError) {
+        return (
+            <div className={styles.layout} style={{ alignItems: 'center', justifyContent: 'center' }}>
+                <div style={{ maxWidth: 480, textAlign: 'center', color: 'var(--text-muted, #666)', lineHeight: 1.6 }}>
+                    <p style={{ fontWeight: 600, color: 'var(--text-primary, #111)' }}>Cannot reach the Neural Analyst backend</p>
+                    <p>Expected it at <code>{api.baseUrl}</code> ({backendError}). Start it with <code>python scripts/demo.py serve</code> or <code>make dev-analyst</code>, then retry.</p>
+                    <button type="button" onClick={() => setAttempt((n) => n + 1)} style={{ marginTop: 12, padding: '8px 16px', borderRadius: 8, border: '1px solid #ccc', background: 'white', cursor: 'pointer' }}>
+                        Retry
+                    </button>
+                </div>
+            </div>
+        );
+    }
 
     if (!authReady) {
         return (
@@ -98,7 +123,7 @@ export default function AppLayout({ children }) {
                             <li key={item.href}>
                                 <Link
                                     href={item.href}
-                                    className={`${styles.navLink} ${pathname === item.href ? styles.active : ''}`}
+                                    className={`${styles.navLink} ${pathname === item.href || pathname?.startsWith(`${item.href}/`) ? styles.active : ''}`}
                                 >
                                     <item.Icon size={20} />
                                     {sidebarOpen && <span>{item.label}</span>}

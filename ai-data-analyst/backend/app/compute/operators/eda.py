@@ -1030,24 +1030,76 @@ class ResampleAggregateOperator:
             out["value_mean"] = np.nan
             out["value_sum"] = np.nan
 
-        periods = pd.to_datetime(out["period"], errors="coerce")
-        if getattr(periods.dt, "tz", None) is not None:
-            periods = periods.dt.tz_convert(None)
-        out["period"] = periods.dt.strftime("%Y-%m-%d %H:%M:%S")
+        return finish_resample(out, chosen_freq, time_col=str(time_col), value_col=value_col)
 
-        return OperatorResult(
-            tables={"resample": out},
-            metrics={
-                "points": int(out.shape[0]),
-            },
-            charts={},
-            summary={
-                "time_column": str(time_col),
-                "value_column": str(value_col) if value_col else None,
-                "freq": chosen_freq,
-                "points": int(out.shape[0]),
-            },
+
+def finish_resample(out: pd.DataFrame, chosen_freq: str, *, time_col: str, value_col: Any) -> OperatorResult:
+    """Labels, highlights, year-over-year and chart for a trend table (period, count, value_mean,
+    value_sum). Shared by the in-memory operator and the batched (disk) path so answers match."""
+    periods = pd.to_datetime(out["period"], errors="coerce")
+    if getattr(periods.dt, "tz", None) is not None:
+        periods = periods.dt.tz_convert(None)
+    out = out.copy()
+    out["period"] = periods.dt.strftime("%Y-%m-%d")
+    out["label"] = _period_labels(periods, chosen_freq)
+    has_value = bool(out["value_sum"].notna().any())
+    measure = "value_sum" if has_value else "count"
+    summary: dict[str, Any] = {
+        "time_column": str(time_col),
+        "value_column": str(value_col) if value_col else None,
+        "freq": chosen_freq,
+        "points": int(out.shape[0]),
+        "measure": measure,
+    }
+    charts: dict[str, Any] = {}
+    series = out[["label", measure]].dropna()
+    if not series.empty:
+        hi, lo = series.loc[series[measure].idxmax()], series.loc[series[measure].idxmin()]
+        summary.update(
+            first_label=str(series["label"].iloc[0]), last_label=str(series["label"].iloc[-1]),
+            last_value=float(series[measure].iloc[-1]),
+            highest={"label": str(hi["label"]), "value": float(hi[measure])},
+            lowest={"label": str(lo["label"]), "value": float(lo[measure])},
         )
+        # Same period a year earlier, when the series reaches back that far.
+        lag = {"M": 12, "Q": 4, "W": 52}.get(chosen_freq)
+        if lag and len(series) > lag and float(series[measure].iloc[-1 - lag]) != 0:
+            prev = float(series[measure].iloc[-1 - lag])
+            summary["year_earlier"] = {"label": str(series["label"].iloc[-1 - lag]), "value": prev,
+                                       "change_pct": (float(series[measure].iloc[-1]) - prev) / abs(prev) * 100}
+        try:
+            from app.compute.chart_helpers import build_chart
+            from app.ml.visualization import ChartType
+
+            what = f"{value_col}" if has_value else "Rows"
+            period = {"D": "Daily", "W": "Weekly", "M": "Monthly", "Q": "Quarterly", "Y": "Yearly"}.get(chosen_freq, "")
+            charts["trend"] = build_chart(series.rename(columns={measure: what, "label": time_col}),
+                                          chart_type=ChartType.LINE, x=time_col, y=what,
+                                          title=f"{period} {'total ' if has_value else ''}{what}".strip())
+        except Exception:
+            pass
+
+    return OperatorResult(
+        tables={"resample": out},
+        metrics={
+            "points": int(out.shape[0]),
+        },
+        charts=charts,
+        summary=summary,
+    )
+
+
+def _period_labels(periods: pd.Series, freq: str) -> list[str]:
+    """How people name periods: 'Jan 2024', '2024 Q1', '2024', 'week of 2024-01-01'."""
+    if freq == "M":
+        return [p.strftime("%b %Y") if pd.notna(p) else "" for p in periods]
+    if freq == "Q":
+        return [f"{p.year} Q{p.quarter}" if pd.notna(p) else "" for p in periods]
+    if freq == "Y":
+        return [str(p.year) if pd.notna(p) else "" for p in periods]
+    if freq == "W":
+        return [f"week to {p.strftime('%Y-%m-%d')}" if pd.notna(p) else "" for p in periods]
+    return [p.strftime("%Y-%m-%d") if pd.notna(p) else "" for p in periods]
 
 
 @dataclass(frozen=True)

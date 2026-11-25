@@ -1,9 +1,67 @@
-# neural-analyst (monorepo)
+# Neural Analyst
 
-This repo is a **single product** (`ai-data-analyst/`) with optional legacy reference code.
+An open-source AI data analyst. Ask a question about your data in plain language and get an
+answer you can check: a language model turns the question into a plan, the plan is validated
+against your dataset, and deterministic code computes every number. Each answer states the
+filters it applied, the rows it matched, and links the tables behind it.
 
-- `ai-data-analyst/`: FastAPI + Next.js — Talk to Your Data, Data Speaks, Data Adequacy (merged validator), subscriptions (SaaS), self-host Docker.
-- `ai-data-validator/`: **Deprecated** — merged into `ai-data-analyst` at `/app/quality`. See `ai-data-validator/DEPRECATED.md`.
+It also trains and scores models the way a careful data scientist would: leakage checks,
+time-ordered evaluation, a naive baseline to beat, a decision cut-off tuned on training folds,
+calibration, error by segment, and drift checks when a saved model scores a new file.
+
+## Try it in two commands
+
+From `ai-data-analyst/backend`, after a one-time setup (Python 3.11+, Node 20.9+:
+`python -m venv .venv` then `.\.venv\Scripts\python.exe -m pip install -r requirements.txt`).
+`serve` installs the frontend packages and builds the frontend on first run:
+
+```powershell
+.\.venv\Scripts\python.exe -m demo check     # load demo data, ask every demo question, verify every number
+.\.venv\Scripts\python.exe -m demo serve     # start backend + frontend on the demo data
+```
+
+Then open http://localhost:3002/app/datasets. The walkthrough, talking points and preflight
+checklist are in [docs/DEMO.md](docs/DEMO.md). Set `OPENAI_API_KEY` in `ai-data-analyst/backend/.env`
+to enable the language-model planner; common questions are answered without it.
+
+## What it does
+
+- **Talk to your data**: totals, counts, averages, rates ("return rate by category"), ratios
+  ("margin % by category"), shares, trends, and period comparisons with filters in plain language,
+  including fiscal and retail (4-4-5) calendars, multi-sheet workbooks and files too large for memory.
+- **Explain changes**: "why did sales drop in Q3?" compares the two periods by every suitable
+  dimension and leads with where the change is concentrated.
+- **Train**: "predict churned" trains and compares models with leakage screening, a time-ordered
+  split, a baseline, ROC/PR AUC, a tuned cut-off for rare outcomes, calibration and the weakest segment.
+- **Score**: "score this file with my churn model" applies a saved model to every row, checks each
+  input for drift against the training data, and reports realised accuracy when the outcome is known.
+- **Safe by design**: SQL sandboxing for uploaded data, per-user model registries and data,
+  connection policies for external databases, and no number ever comes from the language model.
+
+## How it works
+
+```mermaid
+flowchart LR
+    Q[Question] --> R{Rule planner}
+    R -- understood --> P[Plan]
+    R -- not understood --> L[LLM planner] --> V[Validator: schema, types, values] --> P
+    P --> O[Deterministic operators: pandas / DuckDB / scikit-learn]
+    O --> A[Artifacts: tables, charts, models]
+    A --> T[Answer written by templates, with filters, row counts and evidence links]
+```
+
+| Layer | Where |
+| --- | --- |
+| Planning (rules, LLM, validation) | `ai-data-analyst/backend/app/planning/`, `app/api/routes/chat.py` |
+| Operators that compute every number | `ai-data-analyst/backend/app/compute/operators/` |
+| ML training, evaluation, drift, scoring | `ai-data-analyst/backend/app/ml/` |
+| Web app (Next.js) | `ai-data-analyst/frontend/` |
+| Demo data, script and checker | `ai-data-analyst/backend/demo/` |
+
+Tech: FastAPI, SQLAlchemy, pandas, DuckDB, scikit-learn, LiteLLM (OpenAI by default), Next.js 16,
+Plotly. Backend tests: `cd ai-data-analyst/backend && .\.venv\Scripts\python.exe -m pytest -q`.
+
+## Talk to Your Data in detail
 
 After a dataset is processed, **Talk to your data** offers questions based on its column types and profile. Each supported calculation opens a saved evidence table in the chat when one is available. For example, ask `average Net sales by Branch` on a file with those columns. The [companion skill](.agents/skills/neural-analyst/SKILL.md) can ask the same question and inspect the same evidence from Codex or Claude Code.
 
@@ -83,6 +141,7 @@ Object storage (optional):
 
 ## Docs
 
+- `docs/DEMO.md`: interview demo walkthrough, talking points and preflight check.
 - `docs/PROJECT_MAP.md`: folder map.
 - `docs/ARCHITECTURE.md`: request flow for both apps.
 - `docs/INDUSTRY_GRADE_AUDIT.md`: severity-ranked gaps + fixes/backlog.

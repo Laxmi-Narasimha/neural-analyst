@@ -1,6 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import { artifactLabel } from '@/lib/labels';
 
 const Plot = dynamic(() => import('react-plotly.js'), { ssr: false });
 
@@ -15,7 +16,7 @@ export default function ChartArtifact({ artifact, title, compact = false }) {
     const plotSpec = extractPlotSpec(artifact);
     if (!plotSpec) return null;
 
-    const chartTitle = title || artifact?.name || previewTitle(artifact) || 'Chart';
+    const chartTitle = title || artifactLabel(artifact?.name) || previewTitle(artifact) || 'Chart';
 
     return (
         <div style={{

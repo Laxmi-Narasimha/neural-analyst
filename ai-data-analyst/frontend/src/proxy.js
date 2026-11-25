@@ -13,6 +13,6 @@ export const config = {
   matcher: [
     '/about', '/features', '/solutions/:path*', '/integrations', '/changelog',
     '/blog/:path*', '/careers/:path*', '/docs', '/help', '/status', '/security',
-    '/use-cases', '/partners', '/faq', '/setup-keys',
+    '/use-cases', '/partners', '/faq', '/setup-keys', '/pricing', '/contact', '/feedback',
   ],
 };
