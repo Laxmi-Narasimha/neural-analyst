@@ -226,6 +226,7 @@ class DatasetResponse(BaseModel):
 
 class DatasetDetailResponse(DatasetResponse):
     """Detailed dataset response with columns and metadata."""
+    starter_questions: list[str] = Field(default_factory=list)
     
     columns: list[ColumnInfo] = Field(default_factory=list)
     schema_info: dict[str, Any] = Field(default_factory=dict)
@@ -376,6 +377,7 @@ class JobType(str, Enum):
     DATASET_TRANSFORM = "dataset_transform"
     COMPUTE_PLAN = "compute_plan"
     DATASET_PURGE = "dataset_purge"
+    ML_TRAINING = "ml_training"
 
 
 class JobStatus(str, Enum):

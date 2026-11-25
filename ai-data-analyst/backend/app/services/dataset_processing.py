@@ -23,6 +23,9 @@ from app.models import (
 )
 from app.services.data_ingestion import FileFormat, get_ingestion_service
 from app.services.database import db_manager
+from app.services.workbook_scope import profile_workbook
+from app.services import dataset_batches
+from app.services.dataset_loader import _sha256_fileobj
 from app.services.object_store import get_object_store
 
 logger = get_logger(__name__)
@@ -106,8 +109,6 @@ class DatasetProcessingService:
             except Exception:
                 file_size_bytes = 0
 
-            use_sample = file_size_bytes >= 250 * 1024 * 1024
-            sample_rows = 200_000 if use_sample else None
 
             # All dataset paths may live on local disk or remote object storage (S3). For compute and
             # parsing we require a local, seekable file.
@@ -118,64 +119,25 @@ class DatasetProcessingService:
                 filename_hint=original_filename,
             )
 
-            def _ingest_sync() -> tuple[Any, Any]:
+            def _ingest_sync():
                 path = Path(local_path)
-                if not path.exists():
-                    raise FileNotFoundError(str(local_path))
+                fmt = FileFormat(file_format_raw)
+                use_batches = dataset_batches.large_file(path, file_format_raw) or (
+                    file_format_raw in {"csv", "tsv"} and path.stat().st_size >= dataset_batches.LARGE_ROWS)
+                with path.open("rb") as source:
+                    if file_format_raw in {"xls", "xlsx"}:
+                        return profile_workbook(path, file_format_raw, original_filename, _sha256_fileobj(source))
+                    if not use_batches:
+                        frame, profile = ingestion.ingest_file(source, original_filename, file_format=fmt)
+                        return frame, profile, None, None
+                    frame, count = dataset_batches.profile_sample(path, file_format_raw)
+                    profile = ingestion._generate_profile(frame, original_filename, fmt, path.stat().st_size, _sha256_fileobj(source))
+                    return frame, profile, count, None
 
-                ff: FileFormat | None
-                try:
-                    ff = FileFormat(file_format_raw)
-                except Exception:
-                    ff = None
-
-                with path.open("rb") as f:
-                    parse_opts: dict[str, Any] = {}
-                    if sample_rows is not None:
-                        parse_opts["nrows"] = int(sample_rows)
-                    return ingestion.ingest_file(f, original_filename, file_format=ff, **parse_opts)
-
-            df, profile = await asyncio.to_thread(_ingest_sync)
-
-            profiled_rows = int(getattr(df, "shape", [0, 0])[0] or 0) if df is not None else 0
-
-            full_row_count: int | None = None
-            if use_sample:
-                try:
-                    ff = FileFormat(file_format_raw)
-                except Exception:
-                    ff = None
-
-                # Try to compute an exact row count without loading the whole dataset.
-                # - Parquet: metadata contains total rows (fast).
-                # - CSV/TSV: chunked pandas read (out-of-core; accurate for quoting/multiline).
-                try:
-                    if ff == FileFormat.PARQUET:
-                        import pyarrow.parquet as pq
-
-                        pf = pq.ParquetFile(str(local_path))
-                        full_row_count = int(pf.metadata.num_rows) if pf.metadata is not None else None
-                    elif ff in {FileFormat.CSV, FileFormat.TSV}:
-                        from app.services.data_ingestion import CSVParser
-
-                        parser = CSVParser()
-                        with Path(local_path).open("rb") as f:
-                            encoding = parser._detect_encoding(f)
-                            delimiter = "\t" if ff == FileFormat.TSV else parser._detect_delimiter(f, encoding)
-
-                        rows = 0
-                        for chunk in pd.read_csv(
-                            local_path,
-                            encoding=encoding,
-                            delimiter=delimiter,
-                            low_memory=False,
-                            on_bad_lines="warn",
-                            chunksize=200_000,
-                        ):
-                            rows += int(chunk.shape[0])
-                        full_row_count = int(rows)
-                except Exception:
-                    full_row_count = None
+            df, profile, full_row_count, worksheet_catalog = await asyncio.to_thread(_ingest_sync)
+            profiled_rows = len(df)
+            use_sample = full_row_count is not None and full_row_count > profiled_rows
+            sample_rows = profiled_rows if use_sample else None
 
             # Patch the profile with full row_count when available and include sampling metadata.
             if full_row_count is not None:
@@ -185,6 +147,8 @@ class DatasetProcessingService:
                     pass
 
             schema_info = to_jsonable({"columns": [c.to_dict() for c in getattr(profile, "columns", [])]})
+            if worksheet_catalog:
+                schema_info["worksheet_catalog"] = worksheet_catalog
             quality_report = to_jsonable(
                 {
                     "completeness": float(getattr(profile, "completeness_score", 0.0) or 0.0),
@@ -196,7 +160,9 @@ class DatasetProcessingService:
             profile_report = to_jsonable(getattr(profile, "to_dict")())
             if isinstance(profile_report, dict):
                 profile_report["profile_rows"] = int(profiled_rows)
-                profile_report["row_count_source"] = "full" if full_row_count is not None else ("sample" if use_sample else "full")
+                profile_report["row_count_source"] = "full"
+                if full_row_count is not None:
+                    profile_report["batched_source"] = True
                 if use_sample:
                     profile_report["sample_rows"] = int(sample_rows or profiled_rows)
 

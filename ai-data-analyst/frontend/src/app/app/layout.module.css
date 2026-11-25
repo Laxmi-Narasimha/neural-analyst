@@ -1,19 +1,27 @@
 .layout {
     display: flex;
     min-height: 100vh;
-    padding-top: 70px;
+    background: var(--bg-cream, #FAF9F7);
 }
 
 /* Sidebar */
 .sidebar {
-    width: 260px;
-    background: rgba(255, 255, 255, 0.7);
-    padding: 24px 16px;
+    width: 240px;
+    background: #ffffff;
+    border-right: 1px solid rgba(0, 0, 0, 0.06);
+    padding: 16px 12px;
     position: fixed;
-    top: 70px;
+    top: 0;
     left: 0;
-    height: calc(100vh - 70px);
+    bottom: 0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
     overflow-y: auto;
+    overflow-x: hidden;
+    z-index: 40;
+    transition: width 0.2s ease, padding 0.2s ease;
 }
 
 .sidebarNav {
@@ -53,9 +61,7 @@
 /* Main Content */
 .content {
     flex: 1;
-    margin-left: 260px;
-    padding: 32px;
-    min-height: calc(100vh - 70px);
+    min-width: 0;
 }
 
 /* Section Header */
@@ -249,11 +255,6 @@
 }
 
 @media (max-width: 1024px) {
-    .sidebar {
-        width: 80px;
-        padding: 24px 12px;
-    }
-
     .sidebarLink span {
         display: none;
     }
@@ -262,21 +263,9 @@
         justify-content: center;
         padding: 14px;
     }
-
-    .content {
-        margin-left: 80px;
-    }
 }
 
 @media (max-width: 768px) {
-    .sidebar {
-        display: none;
-    }
-
-    .content {
-        margin-left: 0;
-    }
-
     .statsGrid {
         grid-template-columns: 1fr;
     }
@@ -288,16 +277,25 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+    min-height: 100vh;
+    margin-left: 240px;
+    transition: margin-left 0.2s ease;
 }
 
 .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 30;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding: 12px 24px;
+    height: 64px;
+    padding: 0 32px;
     border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-    background: rgba(255, 255, 255, 0.85);
+    background: rgba(250, 249, 247, 0.85);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
 }
 
 .userSection {
@@ -353,4 +351,259 @@
 .userMenuItem:hover {
     background: rgba(139, 92, 246, 0.06);
     color: #1a1a1a;
+}
+
+/* Sidebar — collapsed (icons only) */
+.sidebar.collapsed {
+    width: 64px;
+    padding: 16px 10px;
+}
+
+.collapsed ~ .main {
+    margin-left: 64px;
+}
+
+/* Sidebar — logo row */
+.sidebarHeader {
+    display: flex;
+    align-items: center;
+    height: 40px;
+    padding: 0 6px;
+    flex-shrink: 0;
+}
+
+.logo {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+    color: #1a1a1a;
+    text-decoration: none;
+}
+
+.logo:hover {
+    opacity: 1;
+}
+
+.logoIcon {
+    display: flex;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+}
+
+.logoIcon svg {
+    width: 100%;
+    height: 100%;
+}
+
+.logoText {
+    font-family: 'Instrument Serif', Georgia, serif;
+    font-size: 1.375rem;
+    font-weight: 400;
+    line-height: 1;
+    letter-spacing: -0.02em;
+    color: #1a1a1a;
+    white-space: nowrap;
+}
+
+.logoText span {
+    font-style: italic;
+}
+
+/* Sidebar — navigation */
+.nav {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    flex: 1;
+    min-height: 0;
+}
+
+.newAnalysis {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 40px;
+    padding: 0 16px;
+    background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+    color: #fff;
+    font-weight: 600;
+    font-size: 0.875rem;
+    border-radius: 999px;
+    white-space: nowrap;
+    box-shadow: 0 6px 16px -8px rgba(139, 92, 246, 0.6);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.newAnalysis:hover {
+    opacity: 1;
+    color: #fff;
+    transform: translateY(-1px);
+    box-shadow: 0 10px 22px -8px rgba(139, 92, 246, 0.6);
+}
+
+.newAnalysis svg,
+.navLink svg {
+    flex-shrink: 0;
+}
+
+.navList {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.navLink {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 40px;
+    padding: 0 12px;
+    border-radius: 10px;
+    color: #6b7280;
+    font-size: 0.875rem;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.navLink:hover {
+    opacity: 1;
+    background: rgba(0, 0, 0, 0.04);
+    color: #1a1a1a;
+}
+
+.navLink.active {
+    background: rgba(139, 92, 246, 0.08);
+    color: #7c3aed;
+    font-weight: 600;
+}
+
+/* Sidebar — footer */
+.sidebarFooter {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 12px;
+    border-top: 1px solid rgba(0, 0, 0, 0.06);
+    flex-shrink: 0;
+}
+
+.toggleBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 8px;
+    background: #fff;
+    color: #6b7280;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.toggleBtn:hover {
+    background: rgba(0, 0, 0, 0.03);
+    color: #1a1a1a;
+}
+
+.toggleBtn svg {
+    transition: transform 0.2s ease;
+}
+
+.rotated {
+    transform: rotate(180deg);
+}
+
+.collapsed .sidebarHeader,
+.collapsed .sidebarFooter {
+    justify-content: center;
+}
+
+.collapsed .sidebarHeader,
+.collapsed .newAnalysis,
+.collapsed .navLink {
+    padding: 0;
+    justify-content: center;
+}
+
+/* Top bar — search */
+.searchWrapper {
+    position: relative;
+    flex: 1;
+    max-width: 420px;
+}
+
+.searchIcon {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: #9ca3af;
+    pointer-events: none;
+}
+
+.searchInput {
+    width: 100%;
+    height: 38px;
+    padding: 0 14px 0 38px;
+    font-size: 0.875rem;
+    background: #F5F4F2;
+    border: 1px solid transparent;
+    border-radius: 10px;
+}
+
+.searchInput:focus {
+    background: #fff;
+    border-color: rgba(139, 92, 246, 0.5);
+    box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.1);
+}
+
+/* App shell — responsive */
+@media (max-width: 1024px) {
+    .sidebar {
+        width: 64px;
+        padding: 16px 10px;
+    }
+
+    .logoText,
+    .newAnalysis span,
+    .navLink span {
+        display: none;
+    }
+
+    .sidebarHeader,
+    .sidebarFooter,
+    .newAnalysis,
+    .navLink {
+        justify-content: center;
+    }
+
+    .sidebarHeader,
+    .newAnalysis,
+    .navLink {
+        padding: 0;
+    }
+
+    .main {
+        margin-left: 64px;
+    }
+}
+
+@media (max-width: 768px) {
+    .sidebar {
+        display: none;
+    }
+
+    .main,
+    .collapsed ~ .main {
+        margin-left: 0;
+    }
+
+    .topbar {
+        padding: 0 16px;
+    }
 }

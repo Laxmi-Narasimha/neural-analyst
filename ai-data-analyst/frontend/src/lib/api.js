@@ -5,6 +5,21 @@ import { clearTokens, getAccessToken, setTokens } from './auth';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
 
+// The backend stores and sends UTC timestamps without a zone ("2026-11-25T06:37:27.6"). Browsers read
+// such strings as local time, so "just now" showed as "5 hours ago" east of UTC. Mark them as UTC once,
+// here, for every response.
+const NAIVE_ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/;
+export function markUtc(value) {
+    if (typeof value === 'string') return NAIVE_ISO.test(value) ? `${value}Z` : value;
+    if (Array.isArray(value)) return value.map(markUtc);
+    if (value && typeof value === 'object') {
+        const out = {};
+        for (const [k, v] of Object.entries(value)) out[k] = markUtc(v);
+        return out;
+    }
+    return value;
+}
+
 class APIClient {
     constructor() {
         this.baseUrl = API_BASE_URL;
@@ -58,10 +73,14 @@ class APIClient {
                     clearTokens();
                 }
                 const error = await response.json().catch(() => ({ detail: 'Request failed' }));
-                throw new Error(error.detail || `HTTP ${response.status}`);
+                const detail = typeof error.detail === 'string' ? error.detail : (error.detail?.message || error.message);
+                const failure = new Error(detail || `HTTP ${response.status}`);
+                failure.status = response.status;
+                failure.body = error;
+                throw failure;
             }
 
-            return await response.json();
+            return markUtc(await response.json());
         } catch (error) {
             console.error('API Error:', error);
             throw error;
@@ -91,12 +110,13 @@ class APIClient {
             throw new Error(error.detail || 'Upload failed');
         }
 
-        const json = await response.json();
+        const json = markUtc(await response.json());
         return this._unwrapApiResponse(json);
     }
 
     async listDatasets(page = 1, pageSize = 20, search = '') {
-        const params = new URLSearchParams({ page, page_size: pageSize });
+        // The API serves at most 100 per page and rejects larger requests (422).
+        const params = new URLSearchParams({ page, page_size: Math.min(Math.max(1, pageSize), 100) });
         if (search) params.append('search', search);
         const response = await this.request(`/datasets?${params}`);
         return this._normalizeListResponse(response);
@@ -223,6 +243,11 @@ class APIClient {
     // Billing / Subscription APIs
     // ============================================================================
 
+    async getSystemInfo() {
+        const response = await this.request('/system/info');
+        return this._unwrapApiResponse(response);
+    }
+
     async getSubscriptionStatus() {
         const response = await this.request('/billing/status');
         return this._unwrapApiResponse(response);
@@ -294,24 +319,64 @@ class APIClient {
     // ML APIs
     // ============================================================================
 
-    async trainModel(datasetId, modelType, targetColumn, features = [], config = {}) {
-        return this.request('/ml/train', {
+    async trainModel(datasetId, targetColumn, options = {}) {
+        const response = await this.request('/ml/train', {
             method: 'POST',
             body: JSON.stringify({
                 dataset_id: datasetId,
-                model_type: modelType,
                 target_column: targetColumn,
-                features,
-                config,
+                task: options.task || null,
+                optimize: options.optimize !== false,
+                mode: options.mode || 'baseline',
+                sample_rows: options.sampleRows || null,
+                max_models: options.maxModels || null,
             }),
         });
+        return this._unwrapApiResponse(response) ?? response;
     }
 
-    async predict(modelId, data) {
-        return this.request(`/ml/predict/${modelId}`, {
+    async runAutoML(datasetId, targetColumn, options = {}) {
+        const response = await this.request('/ml/automl', {
             method: 'POST',
-            body: JSON.stringify({ data }),
+            body: JSON.stringify({
+                dataset_id: datasetId,
+                target_column: targetColumn,
+                task: options.task || null,
+                time_budget_minutes: options.timeBudgetMinutes || 60,
+                max_models: options.maxModels || 10,
+                sample_rows: options.sampleRows || null,
+                optimize: options.optimize !== false,
+            }),
         });
+        return this._unwrapApiResponse(response) ?? response;
+    }
+
+    async inferMLTask(datasetId, options = {}) {
+        const response = await this.request('/ml/task-inference', {
+            method: 'POST',
+            body: JSON.stringify({
+                dataset_id: datasetId,
+                preferred_target: options.preferredTarget || null,
+                sample_rows: options.sampleRows || 100000,
+            }),
+        });
+        return this._unwrapApiResponse(response);
+    }
+
+    async getMLJob(jobId) {
+        return this.request(`/ml/jobs/${jobId}`);
+    }
+
+    async predict(modelName, data, modelVersion = null) {
+        const response = await this.request('/ml/predict', {
+            method: 'POST',
+            body: JSON.stringify({
+                model_name: modelName,
+                model_version: modelVersion,
+                data,
+            }),
+        });
+        return this._unwrapApiResponse(response) ?? response;
     }
 
     async listModels() {
@@ -642,7 +707,7 @@ class APIClient {
     // Auth APIs
     // ============================================================================
 
-    async register(email, password, fullName, role = 'analyst') {
+    async register(email, password, fullName, role = 'analyst', inviteCode = '') {
         return this.request('/auth/register', {
             method: 'POST',
             body: JSON.stringify({
@@ -650,6 +715,7 @@ class APIClient {
                 password,
                 full_name: fullName,
                 role,
+                invite_code: inviteCode,
             }),
         });
     }

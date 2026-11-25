@@ -42,11 +42,16 @@ services:
   # Frontend (always runs)
   # ==========================================================================
   frontend:
-    build: ./frontend
+    # NEXT_PUBLIC_API_URL is read by the browser and baked in at build time, so it must be an
+    # address the browser can reach (not the internal 'backend' hostname).
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000/api/v1}
     ports:
       - "${FRONTEND_PORT:-3002}:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://backend:8000/api/v1
+      - NEXT_PUBLIC_API_URL=${PUBLIC_API_URL:-http://localhost:8000/api/v1}
     depends_on:
       backend:
         condition: service_healthy

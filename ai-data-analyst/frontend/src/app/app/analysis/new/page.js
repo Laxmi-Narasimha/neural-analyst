@@ -2,17 +2,39 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { IconArrowRight, IconUpload, IconSparkles, IconChart, IconDatabase, IconCheck, IconLoader, IconTime } from '@/components/icons';
+import Link from 'next/link';
+import { IconArrowRight, IconUpload, IconSparkles, IconChart, IconDatabase, IconCheck, IconLoader, IconTime, IconChevronDown, IconChevronUp } from '@/components/icons';
+import ReactMarkdown from 'react-markdown';
 import api from '@/lib/api';
+import ChartArtifact, { extractChartsFromAgentActions } from '@/components/ChartArtifact';
+import { artifactLabel, keepLineBreaks } from '@/lib/labels';
 import styles from './page.module.css';
 
-const suggestedQueries = [
-    'Show me a summary of this dataset',
-    'What are the correlations between variables?',
-    'Find outliers and anomalies in the data',
-    'Train a prediction model for the target variable',
-    'Run an A/B test analysis',
-];
+function extractModelComparison(agentActions) {
+    if (!Array.isArray(agentActions)) return null;
+    for (const action of agentActions) {
+        if (action?.operator !== 'ml_train_baseline') continue;
+        const summary = action.summary || {};
+        if (Array.isArray(summary.models) && summary.models.length) {
+            return { models: summary.models, summary };
+        }
+        for (const art of action.artifacts || []) {
+            const rows = art?.preview?.preview_rows;
+            if (Array.isArray(rows) && rows.length && String(art?.name || '').includes('model')) {
+                return { models: rows, summary };
+            }
+        }
+    }
+    return null;
+}
+
+function formatMetric(row) {
+    if (row.test_accuracy != null) return `acc ${Number(row.test_accuracy).toFixed(4)}`;
+    if (row.test_r2 != null) return `R² ${Number(row.test_r2).toFixed(4)}`;
+    if (row.test_rmse != null) return `RMSE ${Number(row.test_rmse).toFixed(4)}`;
+    if (row.cv_mean != null) return `CV ${Number(row.cv_mean).toFixed(4)}`;
+    return '—';
+}
 
 const analysisButtons = [
     { id: 'data_speaks', label: 'Data Speaks (EDA)', icon: IconSparkles, plan: null },
@@ -31,7 +53,68 @@ const analysisButtons = [
     { id: 'associations', label: 'Associations', icon: IconChart, plan: [{ operator: 'association_scan', params: { max_categorical_columns: 20, max_numeric_columns: 20, max_pairs: 200 } }] },
     { id: 'outliers', label: 'Outliers', icon: IconSparkles, plan: [{ operator: 'outlier_scan', params: { max_columns: 25 } }] },
     { id: 'outlier_explain', label: 'Explain Outliers', icon: IconSparkles, plan: [{ operator: 'outlier_explain', params: {} }] },
+    { id: 'sentiment', label: 'Sentiment', icon: IconSparkles, plan: [{ operator: 'sentiment_scan', params: { max_columns: 3 } }] },
+    { id: 'forecast', label: 'Forecast', icon: IconChart, plan: [{ operator: 'forecast_scan', params: { horizon: 8 } }] },
+    { id: 'ab_test', label: 'A/B Test', icon: IconCheck, plan: [{ operator: 'ab_test_scan', params: {} }] },
+    { id: 'duckdb', label: 'Full Count (DuckDB)', icon: IconDatabase, plan: [{ operator: 'duckdb_profile', params: {} }] },
+    { id: 'cohort', label: 'Cohort Retention', icon: IconTime, plan: [{ operator: 'cohort_scan', params: { max_periods: 8 } }] },
+    { id: 'funnel', label: 'Funnel', icon: IconChart, plan: [{ operator: 'funnel_scan', params: {} }] },
+    { id: 'rfm', label: 'RFM Segments', icon: IconDatabase, plan: [{ operator: 'rfm_scan', params: {} }] },
+    { id: 'cluster', label: 'K-Means Cluster', icon: IconSparkles, plan: [{ operator: 'clustering_scan', params: { n_clusters: 4 } }] },
+    { id: 'smart_viz', label: 'Auto Charts', icon: IconChart, plan: [{ operator: 'smart_viz_scan', params: { max_charts: 3 } }] },
+    { id: 'corr_heatmap', label: 'Corr Heatmap', icon: IconChart, plan: [{ operator: 'correlation_heatmap', params: {} }] },
 ];
+
+const analysisCategories = [
+    {
+        id: 'explore',
+        label: 'Explore',
+        buttons: ['data_speaks', 'schema', 'preview', 'text'],
+    },
+    {
+        id: 'quality',
+        label: 'Data quality',
+        buttons: ['missing', 'missing_patterns', 'uniqueness', 'outliers', 'outlier_explain'],
+    },
+    {
+        id: 'insights',
+        label: 'Insights',
+        buttons: ['correlation', 'associations', 'trend', 'time_anomalies', 'segments', 'segment_deep_dive'],
+    },
+    {
+        id: 'security',
+        label: 'Security',
+        buttons: ['risk'],
+    },
+    {
+        id: 'advanced',
+        label: 'Forecast & NLP',
+        buttons: ['sentiment', 'forecast', 'ab_test', 'duckdb'],
+    },
+    {
+        id: 'business',
+        label: 'Business analytics',
+        buttons: ['cohort', 'funnel', 'rfm', 'cluster'],
+    },
+    {
+        id: 'viz',
+        label: 'Charts',
+        buttons: ['smart_viz', 'corr_heatmap', 'correlation', 'trend'],
+    },
+    {
+        id: 'ml',
+        label: 'Machine learning',
+        buttons: ['ml_infer', 'ml_train', 'ml_automl'],
+    },
+];
+
+const mlChatActions = {
+    ml_infer: 'Which column should I use as the prediction target? Show target candidates and leakage warnings.',
+    ml_train: 'Train a baseline model with cross-validation and show feature importance.',
+    ml_automl: 'Run full AutoML with hyperparameter tuning on the best target column.',
+};
+
+const analysisButtonMap = Object.fromEntries(analysisButtons.map((btn) => [btn.id, btn]));
 
 export default function NewAnalysisPage() {
     const router = useRouter();
@@ -43,16 +126,32 @@ export default function NewAnalysisPage() {
     const actionParam = searchParams.get('action');
     const autoRunParam = searchParams.get('autoRun');
     const [activeDatasetId, setActiveDatasetId] = useState(datasetIdParam);
+    const [starterDataset, setStarterDataset] = useState(null);
+
+    const [sheetSelection, setSheetSelection] = useState(null);
+    const catalog = starterDataset?.id === activeDatasetId ? starterDataset?.sheets : null;
+    const selectedSheets = sheetSelection?.id === activeDatasetId ? sheetSelection?.names : null;
+    const checkedSheets = selectedSheets ?? (catalog?.length ? [catalog[0].name] : []);
+    const noSheets = Boolean(catalog?.length && !checkedSheets.length);
 
     useEffect(() => {
         setActiveDatasetId(datasetIdParam);
     }, [datasetIdParam]);
 
+    // Datasets the user can talk to, for the picker in the header.
+    const [datasetOptions, setDatasetOptions] = useState([]);
+    useEffect(() => {
+        let cancelled = false;
+        api.listDatasets(1, 100)
+            .then((res) => { if (!cancelled) setDatasetOptions((res.items || []).filter((d) => String(d.status || '').toLowerCase() === 'ready')); })
+            .catch(() => { if (!cancelled) setDatasetOptions([]); });
+        return () => { cancelled = true; };
+    }, [activeDatasetId]);
+
     const [messages, setMessages] = useState([
         {
             role: 'assistant',
-            content: 'Hello! I\'m your AI data analyst. I can help you explore data, run statistical tests, build ML models, and create visualizations.\n\n' +
-                (datasetIdParam ? 'I see you\'ve selected a dataset. What would you like to know about it?' : 'Upload a dataset or select one from your datasets to get started.')
+            content: datasetIdParam ? 'What would you like to investigate in this dataset?' : 'Choose a dataset above, or upload one with the button below, to begin.'
         }
     ]);
     const [input, setInput] = useState('');
@@ -61,10 +160,24 @@ export default function NewAnalysisPage() {
     const [runningAnalysis, setRunningAnalysis] = useState(null);
     const [conversations, setConversations] = useState([]);
     const [loadingConversations, setLoadingConversations] = useState(false);
+    const [toolsOpen, setToolsOpen] = useState(false);
+    const [mlJobId, setMlJobId] = useState(null);
+    const [mlJobStatus, setMlJobStatus] = useState(null);
     const messagesEndRef = useRef(null);
     const fileInputRef = useRef(null);
     const promptConsumedRef = useRef(false);
     const actionConsumedRef = useRef(false);
+
+    useEffect(() => {
+        if (!activeDatasetId || starterDataset?.id === activeDatasetId) return;
+        let current = true;
+        api.getDataset(activeDatasetId).then(dataset => {
+            if (current) setStarterDataset({ id: dataset.id, questions: dataset.starter_questions || [], sheets: dataset.schema_info?.worksheet_catalog });
+        }).catch(() => {
+            // The chat input remains available if the profile cannot be loaded.
+        });
+        return () => { current = false; };
+    }, [activeDatasetId, conversationParam, starterDataset?.id]);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -73,6 +186,48 @@ export default function NewAnalysisPage() {
     useEffect(() => {
         scrollToBottom();
     }, [messages]);
+
+    useEffect(() => {
+        if (!mlJobId) return undefined;
+        let cancelled = false;
+        const poll = async () => {
+            try {
+                const status = await api.getMLJob(mlJobId);
+                if (cancelled) return;
+                setMlJobStatus(status?.status || status?.data?.status);
+                const st = String(status?.status || '').toLowerCase();
+                if (st === 'completed' && status?.result?.best_model) {
+                    setMessages((prev) => [
+                        ...prev,
+                        {
+                            role: 'assistant',
+                            content:
+                                `**AutoML finished.** Best model: **${status.result.best_model}** on target **${status.result.target_column}**.\n\n` +
+                                `Registered as **${status.result.registered_model}** (v${status.result.registered_version}).`,
+                        },
+                    ]);
+                    setMlJobId(null);
+                } else if (st === 'failed') {
+                    setMessages((prev) => [
+                        ...prev,
+                        {
+                            role: 'assistant',
+                            content: `AutoML job failed: ${status?.error_message || status?.message || 'Unknown error'}`,
+                        },
+                    ]);
+                    setMlJobId(null);
+                }
+            } catch (e) {
+                console.error('ML job poll failed', e);
+            }
+        };
+        poll();
+        const id = setInterval(poll, 4000);
+        return () => {
+            cancelled = true;
+            clearInterval(id);
+        };
+    }, [mlJobId]);
 
     useEffect(() => {
         const loadConversations = async () => {
@@ -93,11 +248,14 @@ export default function NewAnalysisPage() {
         const convId = String(conversationParam || '').trim();
         if (!convId || convId === conversationId) return;
 
+        let current = true;
         const loadConversation = async () => {
             try {
                 setIsLoading(true);
                 const data = await api.getConversation(convId);
+                if (!current) return;
                 setConversationId(convId);
+                setSheetSelection({ id: data.active_dataset_id, names: data.worksheets });
                 if (data?.active_dataset_id) {
                     setActiveDatasetId(String(data.active_dataset_id));
                 }
@@ -112,10 +270,11 @@ export default function NewAnalysisPage() {
             } catch (e) {
                 console.error('Failed to restore conversation', e);
             } finally {
-                setIsLoading(false);
+                if (current) setIsLoading(false);
             }
         };
         loadConversation();
+        return () => { current = false; };
     }, [conversationParam]);
 
     const appendAssistantMessage = (response) => {
@@ -134,14 +293,19 @@ export default function NewAnalysisPage() {
 
     const sendChatMessage = async (userMessage, { context = {}, displayMessage = null } = {}) => {
         const text = String(userMessage || '').trim();
-        if (!text || isLoading) return;
+        if (!text || isLoading || noSheets) return;
 
         setInput('');
         setMessages((prev) => [...prev, { role: 'user', content: displayMessage || text }]);
         setIsLoading(true);
 
         try {
-            const response = await api.sendMessage(text, conversationId, activeDatasetId, context);
+            const response = await api.sendMessage(text, conversationId, activeDatasetId, {
+                ...context,
+                ...(selectedSheets ? { worksheets: selectedSheets } : {}),
+            });
+            const confirmed = response.metadata?.analysis_scope?.worksheets ?? response.metadata?.worksheets;
+            if (confirmed) setSheetSelection({ id: activeDatasetId, names: confirmed });
 
             if (response.conversation_id) {
                 setConversationId(response.conversation_id);
@@ -151,6 +315,11 @@ export default function NewAnalysisPage() {
             }
 
             appendAssistantMessage(response);
+            const jobId = response?.metadata?.ml_job_id;
+            if (jobId) {
+                setMlJobId(String(jobId));
+                setMlJobStatus('queued');
+            }
         } catch (error) {
             console.error('Chat error:', error);
             setMessages((prev) => [
@@ -190,19 +359,21 @@ export default function NewAnalysisPage() {
 
     useEffect(() => {
         const p = String(promptParam || '').trim();
-        if (!p) return;
-        if (promptConsumedRef.current) return;
-        promptConsumedRef.current = true;
-
-        setInput(p);
+        if (!p) {
+            promptConsumedRef.current = null;
+            return;
+        }
+        if (isLoading || (datasetIdParam && datasetIdParam !== activeDatasetId)) return;
+        const key = JSON.stringify([activeDatasetId, p, autoSendParam]);
+        if (promptConsumedRef.current === key) return;
+        promptConsumedRef.current = key;
         const auto = String(autoSendParam || '').toLowerCase();
         if (auto === '1' || auto === 'true') {
-            // Defer to allow state to settle before sending.
-            setTimeout(() => {
-                sendChatMessage(p);
-            }, 0);
+            sendChatMessage(p);
+        } else {
+            setInput(p);
         }
-    }, [promptParam, autoSendParam]);
+    }, [promptParam, autoSendParam, datasetIdParam, activeDatasetId, isLoading]);
 
     const handleSuggestionClick = (query) => {
         setInput(query);
@@ -362,12 +533,13 @@ export default function NewAnalysisPage() {
             const processed = await waitForDatasetReady(datasetId);
 
             setActiveDatasetId(datasetId);
+            setStarterDataset({ id: datasetId, questions: processed.starter_questions || [], sheets: processed.schema_info?.worksheet_catalog });
             setConversationId(null);
             router.replace(`/app/analysis/new?dataset=${datasetId}`);
 
-            setMessages(prev => [...prev, {
+            setMessages([{
                 role: 'assistant',
-                content: `Dataset ready.\n- Rows: ${(processed?.row_count || 0).toLocaleString()}\n- Columns: ${processed?.column_count || 0}\n\nAsk a question like: \"show missing values\".`
+                content: `Dataset ready. ${(processed?.row_count || 0).toLocaleString()} rows and ${processed?.column_count || 0} columns. What would you like to investigate?`
             }]);
         } catch (error) {
             setMessages(prev => [...prev, {
@@ -382,43 +554,148 @@ export default function NewAnalysisPage() {
     return (
         <div className={styles.page}>
             <div className={styles.chatContainer}>
-                {conversations.length > 0 && (
-                    <div className={styles.conversationBar}>
-                        <span className={styles.conversationLabel}>
-                            {loadingConversations ? 'Loading chats...' : 'Recent conversations'}
-                        </span>
-                        <div className={styles.conversationList}>
-                            {conversations.map((c) => (
-                                <button
-                                    key={c.id}
-                                    type="button"
-                                    className={`${styles.conversationChip} ${String(conversationId) === String(c.id) ? styles.conversationChipActive : ''}`}
-                                    onClick={() => router.push(`/app/analysis/new?dataset=${c.active_dataset_id || activeDatasetId || ''}&conversation=${c.id}`)}
-                                >
-                                    {c.title || 'Conversation'}
-                                </button>
+                <div className={styles.chatHeader}>
+                    <div className={styles.chatHeaderMain}>
+                        <h1 className={styles.chatTitle}>Analysis chat</h1>
+                        <label className={styles.historyLabel} htmlFor="dataset-select">Dataset</label>
+                        <select
+                            id="dataset-select"
+                            className={styles.historySelect}
+                            value={activeDatasetId || ''}
+                            disabled={isLoading}
+                            onChange={(e) => {
+                                const id = e.target.value;
+                                setConversationId(null);
+                                setSheetSelection(null);
+                                setMessages([{
+                                    role: 'assistant',
+                                    content: id ? 'What would you like to investigate in this dataset?' : 'Upload a dataset or select one to begin.',
+                                }]);
+                                router.push(id ? `/app/analysis/new?dataset=${id}` : '/app/analysis/new');
+                            }}
+                        >
+                            <option value="">{datasetOptions.length ? 'Choose a dataset' : 'No datasets yet'}</option>
+                            {datasetOptions.map((d) => (
+                                <option key={d.id} value={d.id}>
+                                    {d.name}{d.row_count != null ? ` (${Number(d.row_count).toLocaleString()} rows)` : ''}
+                                </option>
                             ))}
+                        </select>
+                        {mlJobId && (
+                            <span className={styles.mlJobBadge}>
+                                AutoML {mlJobStatus || 'running'}…
+                            </span>
+                        )}
+                    </div>
+                    {catalog?.length > 0 && (
+                        <details className={styles.sheetPicker}>
+                            <summary>Worksheets · {checkedSheets.length} of {catalog.length}</summary>
+                            <fieldset disabled={isLoading}>
+                                <legend>Analyze worksheets together</legend>
+                                <p>Rows are combined by column name. Missing columns are blank.</p>
+                                {catalog.map(sheet => (
+                                    <label key={sheet.name}>
+                                        <input type="checkbox" checked={checkedSheets.includes(sheet.name)}
+                                            onChange={e => setSheetSelection({ id: activeDatasetId, names: e.target.checked
+                                                ? [...checkedSheets, sheet.name] : checkedSheets.filter(n => n !== sheet.name) })} />
+                                        {sheet.name} ({sheet.rows.toLocaleString()} rows)
+                                    </label>
+                                ))}
+                            </fieldset>
+                        </details>
+                    )}
+                    {conversations.length > 0 && (
+                        <div className={styles.historyControl}>
+                            <label className={styles.historyLabel} htmlFor="conversation-select">
+                                History
+                            </label>
+                            <select
+                                id="conversation-select"
+                                className={styles.historySelect}
+                                value={conversationId || ''}
+                                disabled={loadingConversations || isLoading}
+                                onChange={(e) => {
+                                    const id = e.target.value;
+                                    if (!id) {
+                                        setConversationId(null);
+                                        setSheetSelection(null);
+                                        setMessages([{ role: 'assistant', content: 'What would you like to investigate in this dataset?' }]);
+                                        router.push(`/app/analysis/new?dataset=${activeDatasetId || ''}`);
+                                        return;
+                                    }
+                                    const selected = conversations.find((c) => String(c.id) === id);
+                                    router.push(
+                                        `/app/analysis/new?dataset=${selected?.active_dataset_id || activeDatasetId || ''}&conversation=${id}`
+                                    );
+                                }}
+                            >
+                                <option value="">New conversation</option>
+                                {conversations.map((c) => (
+                                    <option key={c.id} value={c.id}>
+                                        {c.title || 'Conversation'}
+                                    </option>
+                                ))}
+                            </select>
                         </div>
+                    )}
+                    <button
+                        type="button"
+                        className={`${styles.toolsToggle} ${toolsOpen ? styles.toolsToggleOpen : ''}`}
+                        onClick={() => setToolsOpen((open) => !open)}
+                        aria-expanded={toolsOpen}
+                    >
+                        <IconChart size={16} />
+                        Analysis tools
+                        {toolsOpen ? <IconChevronUp size={16} /> : <IconChevronDown size={16} />}
+                    </button>
+                </div>
+
+                {toolsOpen && (
+                    <div className={styles.toolsPanel}>
+                        {analysisCategories.map((category) => (
+                            <div key={category.id} className={styles.toolCategory}>
+                                <span className={styles.toolCategoryLabel}>{category.label}</span>
+                                <div className={styles.toolCategoryButtons}>
+                                    {category.id === 'ml'
+                                        ? Object.entries(mlChatActions).map(([actionId, prompt]) => (
+                                            <button
+                                                key={actionId}
+                                                type="button"
+                                                className={styles.analysisBtn}
+                                                onClick={() => sendChatMessage(prompt)}
+                                                disabled={isLoading || !activeDatasetId}
+                                            >
+                                                <IconSparkles size={14} />
+                                                {actionId === 'ml_infer' && 'Find target'}
+                                                {actionId === 'ml_train' && 'Train baseline'}
+                                                {actionId === 'ml_automl' && 'Full AutoML'}
+                                            </button>
+                                        ))
+                                        : category.buttons.map((btnId) => {
+                                            const btn = analysisButtonMap[btnId];
+                                            if (!btn) return null;
+                                            return (
+                                                <button
+                                                    key={btn.id}
+                                                    type="button"
+                                                    className={`${styles.analysisBtn} ${runningAnalysis === btn.id ? styles.running : ''}`}
+                                                    onClick={() => handleAnalysisButton(btn)}
+                                                    disabled={runningAnalysis !== null}
+                                                >
+                                                    {runningAnalysis === btn.id ? (
+                                                        <IconLoader size={14} className={styles.spinning} />
+                                                    ) : (
+                                                        <btn.icon size={14} />
+                                                    )}
+                                                    {btn.label}
+                                                </button>
+                                            );
+                                        })}
+                                </div>
+                            </div>
+                        ))}
                     </div>
                 )}
-                {/* Analysis Buttons */}
-                <div className={styles.analysisButtons}>
-                    {analysisButtons.map((btn) => (
-                        <button
-                            key={btn.id}
-                            className={`${styles.analysisBtn} ${runningAnalysis === btn.id ? styles.running : ''}`}
-                            onClick={() => handleAnalysisButton(btn)}
-                            disabled={runningAnalysis !== null}
-                        >
-                            {runningAnalysis === btn.id ? (
-                                <IconLoader size={16} className={styles.spinning} />
-                            ) : (
-                                <btn.icon size={16} />
-                            )}
-                            {btn.label}
-                        </button>
-                    ))}
-                </div>
 
                 {/* Messages */}
                 <div className={styles.messages}>
@@ -433,7 +710,13 @@ export default function NewAnalysisPage() {
                                 </div>
                             )}
                             <div className={styles.messageContent}>
-                                <div className={styles.messageText}>{message.content}</div>
+                                {message.role === 'assistant' ? (
+                                    <div className={styles.markdown}>
+                                        <ReactMarkdown>{keepLineBreaks(message.content)}</ReactMarkdown>
+                                    </div>
+                                ) : (
+                                    <div className={styles.messageText}>{message.content}</div>
+                                )}
                                 {Array.isArray(message.clarification?.options) && message.clarification.options.length > 0 && (
                                     <div className={styles.clarificationOptions}>
                                         {message.clarification.options.map((option, optionIndex) => {
@@ -468,6 +751,66 @@ export default function NewAnalysisPage() {
                                         ))}
                                     </div>
                                 )}
+                                {extractChartsFromAgentActions(message.agentActions).map((chart, ci) => (
+                                    <ChartArtifact key={`chart-${index}-${ci}`} artifact={chart} compact />
+                                ))}
+                                {message.agentActions?.some(action => action.artifacts?.some(a => a.artifact_type === 'table')) && (
+                                    <details className={styles.evidence}>
+                                        <summary>Inspect supporting tables</summary>
+                                        <ul>
+                                            {message.agentActions.flatMap(action => (action.artifacts || [])
+                                                .filter(a => a.artifact_type === 'table' && a.artifact_id)
+                                                .map(a => (
+                                                    <li key={a.artifact_id}>
+                                                        <Link href={`/app/artifacts/${a.artifact_id}`}>{artifactLabel(a.name)}</Link>
+                                                        {a.dataset_version && ` · dataset version ${a.dataset_version.slice(0, 12)}`}
+                                                    </li>
+                                                )))}
+                                        </ul>
+                                    </details>
+                                )}
+                                {(() => {
+                                    const comparison = extractModelComparison(message.agentActions);
+                                    if (!comparison) return null;
+                                    const { models, summary } = comparison;
+                                    const best = summary?.best_model;
+                                    return (
+                                        <div className={styles.modelPanel}>
+                                            <div className={styles.modelPanelHeader}>
+                                                <span>Model comparison</span>
+                                                {summary?.target_column && (
+                                                    <span className={styles.modelPanelMeta}>
+                                                        Target: {summary.target_column}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <table className={styles.modelTable}>
+                                                <thead>
+                                                    <tr>
+                                                        <th>Model</th>
+                                                        <th>CV</th>
+                                                        <th>Test</th>
+                                                        <th>Time (s)</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {models.map((row, ri) => {
+                                                        const name = row.display_name || row.model_name || `Model ${ri + 1}`;
+                                                        const isBest = best && (row.model_name === best || name === best);
+                                                        return (
+                                                            <tr key={`${name}-${ri}`} className={isBest ? styles.modelBestRow : ''}>
+                                                                <td>{name}{isBest ? ' ★' : ''}</td>
+                                                                <td>{row.cv_mean != null ? Number(row.cv_mean).toFixed(4) : '—'}</td>
+                                                                <td>{formatMetric(row)}</td>
+                                                                <td>{row.training_sec != null ? Number(row.training_sec).toFixed(1) : '—'}</td>
+                                                            </tr>
+                                                        );
+                                                    })}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    );
+                                })()}
                             </div>
                         </div>
                     ))}
@@ -487,13 +830,14 @@ export default function NewAnalysisPage() {
                 </div>
 
                 {/* Suggestions */}
-                {messages.length === 1 && (
+                {messages.length === 1 && !conversationParam && (!catalog?.length || (checkedSheets.length === 1 && checkedSheets[0] === catalog[0].name)) && starterDataset?.id === activeDatasetId && starterDataset?.questions?.length > 0 && (
                     <div className={styles.suggestions}>
-                        {suggestedQueries.map((query, i) => (
+                        {starterDataset.questions.map(query => (
                             <button
-                                key={i}
+                                key={query}
                                 className={styles.suggestionBtn}
-                                onClick={() => handleSuggestionClick(query)}
+                                disabled={isLoading}
+                                onClick={() => sendChatMessage(query)}
                             >
                                 {query}
                             </button>
@@ -514,7 +858,7 @@ export default function NewAnalysisPage() {
                         <input
                             ref={fileInputRef}
                             type="file"
-                            accept=".csv,.xlsx,.xls,.json,.parquet"
+                            accept=".csv,.tsv,.xlsx,.xls,.json,.parquet"
                             onChange={handleFileUpload}
                             style={{ display: 'none' }}
                         />
@@ -529,7 +873,7 @@ export default function NewAnalysisPage() {
                         <button
                             type="submit"
                             className={styles.sendBtn}
-                            disabled={!input.trim() || isLoading}
+                            disabled={!input.trim() || isLoading || noSheets}
                         >
                             <IconArrowRight size={18} />
                         </button>

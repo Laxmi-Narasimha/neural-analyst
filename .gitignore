@@ -47,3 +47,10 @@ models/
 *.sqlite
 *.db
 *.log
+
+# Local trained-model registry (runtime data)
+model_registry/
+**/model_registry/
+
+# Demo workspace (python -m demo)
+**/demo_workspace/

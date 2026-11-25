@@ -48,10 +48,12 @@ from app.core.exceptions import (
 from app.core.logging import get_logger, LogContext
 from app.core.serialization import to_jsonable
 from app.compute.artifacts import ArtifactStore, TableStorageFormat
+from app.compute.starter_questions import starter_plans
 from app.models import Artifact as ArtifactModel
 from app.services.artifact_index import ArtifactIndexService
 from app.services.database import get_db_session
 from app.services.dataset_loader import DatasetLoaderService
+from app.services.subscription_service import PREVIEW_OPERATORS, SubscriptionService
 from app.api.routes.auth import require_permission
 from app.services.auth_service import AuthUser, Permission
 
@@ -75,34 +77,10 @@ def _sanitize_filename(name: str) -> str:
 
 
 def _run_duckdb_query_sync(*, file_path: str, file_format: str, sql: str) -> tuple["pd.DataFrame", float]:
-    import duckdb
-    import pandas as pd
+    # Sandboxed: the query cannot read any file but this dataset (see app/services/dataset_sql.py).
+    from app.services.dataset_sql import run_dataset_sql
 
-    def _quote(value: str) -> str:
-        v = str(value or "")
-        v = v.replace("\\", "/")
-        v = v.replace("'", "''")
-        return f"'{v}'"
-
-    con = duckdb.connect(database=":memory:")
-    try:
-        fmt = str(file_format or "").lower().strip()
-        if fmt == "parquet":
-            con.execute(f"CREATE VIEW dataset AS SELECT * FROM read_parquet({_quote(file_path)})")
-        elif fmt in {"csv", "tsv"}:
-            con.execute(f"CREATE VIEW dataset AS SELECT * FROM read_csv_auto({_quote(file_path)})")
-        else:
-            raise ValueError("Dataset SQL is supported for CSV/TSV/Parquet only")
-
-        t0 = time.perf_counter()
-        df: pd.DataFrame = con.execute(str(sql)).df()
-        dur_ms = (time.perf_counter() - t0) * 1000.0
-        return df, float(dur_ms)
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
+    return run_dataset_sql(file_path=file_path, file_format=file_format, sql=sql)
 
 
 def _load_query_source_df(*, file_path: str, file_format: str) -> "pd.DataFrame":
@@ -332,6 +310,9 @@ async def upload_dataset(
             filename=original_filename,
             reason=f"File size ({file_size / 1024 / 1024:.1f}MB) exceeds maximum ({settings.max_upload_size_mb}MB)"
         )
+
+    subscription = SubscriptionService(db)
+    await subscription.assert_can_upload(user_id, file_size_bytes=file_size)
     
     try:
         # Store the file via the configured object store (local disk or S3).
@@ -390,6 +371,8 @@ async def upload_dataset(
         db.add(job)
         await db.commit()
         await db.refresh(job)
+
+        await subscription.record_upload(user_id)
 
         enqueue_dataset_processing(background_tasks=background_tasks, dataset_id=dataset.id, job_id=job.id)
         
@@ -513,6 +496,22 @@ async def get_dataset(
         for c in dataset.columns
     ]
     
+    dataset_status = _schema_dataset_status(dataset.status)
+    questions = starter_plans(dataset.schema_info) if dataset_status == DatasetStatus.READY else {}
+    subscription = SubscriptionService(db)
+    if questions and subscription.is_enforcement_enabled():
+        account = await subscription.get_status(user.user_id)
+        if account["limits"].get("compute_sessions") == 0:
+            questions = {q: step for q, step in questions.items() if step["operator"] in PREVIEW_OPERATORS}
+
+    schema_info = dataset.schema_info or {}
+    if dataset_status == DatasetStatus.READY and dataset.file_format in {"xls", "xlsx"}:
+        from app.services.workbook_scope import workbook_catalog
+        catalog = await workbook_catalog(dataset, db)
+        if "worksheet_catalog" not in schema_info:
+            await db.commit()
+        schema_info = {**schema_info, "worksheet_catalog": catalog}
+
     response = DatasetDetailResponse(
         id=dataset.id,
         name=dataset.name,
@@ -520,7 +519,8 @@ async def get_dataset(
         original_filename=dataset.original_filename,
         file_size_bytes=dataset.file_size_bytes,
         file_format=dataset.file_format,
-        status=_schema_dataset_status(dataset.status),
+        status=dataset_status,
+        starter_questions=list(questions),
         error_message=dataset.error_message,
         row_count=dataset.row_count,
         column_count=dataset.column_count,
@@ -529,7 +529,7 @@ async def get_dataset(
         created_at=dataset.created_at,
         updated_at=dataset.updated_at,
         columns=columns,
-        schema_info=dataset.schema_info,
+        schema_info=schema_info,
         quality_report=dataset.quality_report,
         profile_report=dataset.profile_report
     )

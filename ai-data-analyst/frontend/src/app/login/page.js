@@ -8,6 +8,8 @@ import { IconMail, IconLock, IconEye, IconEyeOff, IconArrowRight, IconKey } from
 import api from '@/lib/api';
 import styles from './page.module.css';
 
+const PRIVATE_BETA = process.env.NEXT_PUBLIC_PRIVATE_BETA !== 'false';
+
 export default function LoginPage() {
     const router = useRouter();
     const [showPassword, setShowPassword] = useState(false);
@@ -128,7 +130,7 @@ export default function LoginPage() {
                         <p className={styles.registerPrompt}>
                             Don't have an account?{' '}
                             <Link href="/register" className={styles.registerLink}>
-                                Create one free
+                                {PRIVATE_BETA ? 'Use an invite code' : 'Create one free'}
                             </Link>
                         </p>
                     </div>
@@ -143,15 +145,19 @@ export default function LoginPage() {
                 >
                     <div className={styles.visualContent}>
                         <div className={styles.visualGlow}></div>
-                        <h2 className={styles.visualTitle}>
-                            Analyze data
-                            <span className={styles.gradient}> 24/7</span>
-                        </h2>
-                        <p className={styles.visualDesc}>
-                            Your AI analyst works while you sleep. Process millions of rows,
-                            build ML models, and generate insights — automatically.
-                        </p>
-                        <div className={styles.visualStats}>
+                        {PRIVATE_BETA ? <>
+                            <h2 className={styles.visualTitle}>Explore your data <span className={styles.gradient}>with evidence</span></h2>
+                            <p className={styles.visualDesc}>Sign in to continue your private beta analysis.</p>
+                        </> : <>
+                            <h2 className={styles.visualTitle}>
+                                Analyze data
+                                <span className={styles.gradient}> 24/7</span>
+                            </h2>
+                            <p className={styles.visualDesc}>
+                                Your AI analyst works while you sleep. Process millions of rows,
+                                build ML models, and generate insights — automatically.
+                            </p>
+                            <div className={styles.visualStats}>
                             <div className={styles.visualStat}>
                                 <span className={styles.statValue}>244+</span>
                                 <span className={styles.statLabel}>Features</span>
@@ -164,7 +170,8 @@ export default function LoginPage() {
                                 <span className={styles.statValue}>99.9%</span>
                                 <span className={styles.statLabel}>Uptime</span>
                             </div>
-                        </div>
+                            </div>
+                        </>}
                     </div>
                 </motion.div>
             </div>

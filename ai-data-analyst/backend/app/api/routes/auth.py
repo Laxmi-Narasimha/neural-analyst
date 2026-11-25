@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import secrets
 from typing import Any, Optional
 from datetime import datetime
 from uuid import UUID, uuid5, NAMESPACE_DNS
@@ -42,6 +43,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(..., min_length=8)
     full_name: Optional[str] = None
     role: Optional[str] = "analyst"
+    invite_code: Optional[str] = None
 
 
 class LoginRequest(BaseModel):
@@ -227,7 +229,15 @@ async def register(
 ):
     """Register a new user."""
     try:
-        role = UserRole(request.role) if request.role else UserRole.ANALYST
+        configured_invite = get_settings().registration_invite_code
+        if configured_invite and not secrets.compare_digest(
+            request.invite_code or "", configured_invite.get_secret_value()
+        ):
+            raise HTTPException(status_code=403, detail="A valid invitation is required")
+        # Public registration must never assign privileged roles from user input.
+        if request.role and request.role.lower() != UserRole.ANALYST.value:
+            raise HTTPException(status_code=400, detail="Public registration only supports analyst accounts")
+        role = UserRole.ANALYST
 
         result = await auth_service.register_user(
             db=db,
@@ -236,6 +246,13 @@ async def register(
             role=role,
             full_name=request.full_name,
         )
+
+        if configured_invite and get_settings().deployment_mode.value == "saas":
+            from app.services.subscription_service import SubscriptionService, SubscriptionPlan
+
+            await SubscriptionService(db).set_plan(
+                UUID(result["user_id"]), plan=SubscriptionPlan.BETA.value
+            )
 
         return {
             "status": "success",
@@ -328,7 +345,17 @@ async def create_api_key(
     """Create a new API key."""
     permissions = None
     if request.permissions:
-        permissions = [Permission(p) for p in request.permissions]
+        try:
+            permissions = [Permission(p) for p in request.permissions]
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown permission")
+        held = set(user.permissions or [])
+        extra = [p.value for p in permissions if p not in held]
+        if extra:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"A key cannot have permissions you do not have: {', '.join(extra)}",
+            )
 
     key_id, secret = auth_service.api_keys.generate_key(
         user_id=str(user.user_id),
@@ -351,7 +378,7 @@ async def revoke_api_key(
     auth_service: AuthenticationService = Depends(get_auth_service)
 ):
     """Revoke an API key."""
-    if auth_service.api_keys.revoke_key(key_id):
+    if auth_service.api_keys.revoke_key(key_id, user_id=str(user.user_id)):
         return {"status": "success", "message": "API key revoked"}
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,

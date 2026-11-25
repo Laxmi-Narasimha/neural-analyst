@@ -8,6 +8,8 @@ import { IconMail, IconLock, IconUser, IconEye, IconEyeOff, IconArrowRight, Icon
 import api from '@/lib/api';
 import styles from '../login/page.module.css';
 
+const PRIVATE_BETA = process.env.NEXT_PUBLIC_PRIVATE_BETA !== 'false';
+
 export default function RegisterPage() {
     const router = useRouter();
     const [showPassword, setShowPassword] = useState(false);
@@ -15,6 +17,7 @@ export default function RegisterPage() {
         name: '',
         email: '',
         password: '',
+        inviteCode: '',
     });
     const [isLoading, setIsLoading] = useState(false);
     const [errorMessage, setErrorMessage] = useState(null);
@@ -28,7 +31,7 @@ export default function RegisterPage() {
         setIsLoading(true);
         setErrorMessage(null);
         try {
-            await api.register(formData.email, formData.password, formData.name, 'analyst');
+            await api.register(formData.email, formData.password, formData.name, 'analyst', formData.inviteCode);
             await api.login(formData.email, formData.password);
             router.replace('/app/dashboard');
         } catch (err) {
@@ -64,7 +67,7 @@ export default function RegisterPage() {
                         <div className={styles.formHeader}>
                             <h1 className={styles.title}>Create your account</h1>
                             <p className={styles.subtitle}>
-                                Start analyzing data in minutes — free forever
+                                Private beta access is available by invitation.
                             </p>
                         </div>
 
@@ -164,6 +167,24 @@ export default function RegisterPage() {
                                 )}
                             </div>
 
+                            <div className={styles.inputGroup}>
+                                <label htmlFor="inviteCode" className={styles.label}>Invite code (private beta)</label>
+                                <div className={styles.inputWrapper}>
+                                    <IconLock size={20} className={styles.inputIcon} />
+                                    <input
+                                        type="text"
+                                        id="inviteCode"
+                                        name="inviteCode"
+                                        value={formData.inviteCode}
+                                        onChange={handleChange}
+                                        placeholder="Enter your invite code"
+                                        className={styles.input}
+                                        autoComplete="off"
+                                        required={PRIVATE_BETA}
+                                    />
+                                </div>
+                            </div>
+
                             <button
                                 type="submit"
                                 className={styles.submitBtn}
@@ -211,8 +232,8 @@ export default function RegisterPage() {
                     <div className={styles.visualContent}>
                         <div className={styles.visualGlow}></div>
                         <h2 className={styles.visualTitle}>
-                            Included in
-                            <span className={styles.gradient}> Free</span>
+                            {PRIVATE_BETA ? 'Join the' : 'Included in'}
+                            <span className={styles.gradient}>{PRIVATE_BETA ? ' private beta' : ' Free'}</span>
                         </h2>
                         <ul style={{
                             listStyle: 'none',
@@ -221,13 +242,18 @@ export default function RegisterPage() {
                             flexDirection: 'column',
                             gap: 'var(--space-4)'
                         }}>
-                            {[
+                            {(PRIVATE_BETA ? [
+                                'Invitation required',
+                                'Upload and explore datasets',
+                                'Review evidence behind results',
+                                'Help shape the product',
+                            ] : [
                                 '100 queries per month',
                                 'Basic EDA & statistics',
                                 '10MB dataset upload',
                                 '5 visualizations per day',
                                 'Community support',
-                            ].map((feature) => (
+                            ]).map((feature) => (
                                 <li key={feature} style={{
                                     display: 'flex',
                                     alignItems: 'center',

@@ -3,9 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.routes.auth import require_permission
+from app.api.routes.auth import require_admin
 from app.api.schemas import APIResponse, CachePruneResponse, StorageGcRequest, StorageGcResponse
-from app.services.auth_service import AuthUser, Permission
+from app.services.auth_service import AuthUser
 from app.services.database import get_db_session
 from app.services.object_store import get_object_store
 from app.services.storage_gc import StorageGCService
@@ -22,7 +22,7 @@ router = APIRouter()
 async def storage_gc(
     request: StorageGcRequest,
     db: AsyncSession = Depends(get_db_session),
-    user: AuthUser = Depends(require_permission(Permission.DELETE_DATA)),
+    user: AuthUser = Depends(require_admin()),
 ):
     service = StorageGCService(db)
     result = await service.run(
@@ -43,7 +43,7 @@ async def storage_gc(
 )
 async def cache_prune(
     db: AsyncSession = Depends(get_db_session),
-    user: AuthUser = Depends(require_permission(Permission.DELETE_DATA)),
+    user: AuthUser = Depends(require_admin()),
 ):
     obj = get_object_store()
     res = obj.prune_cache()

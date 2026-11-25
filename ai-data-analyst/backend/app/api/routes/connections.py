@@ -139,6 +139,17 @@ async def _get_connection(db: AsyncSession, *, owner_id: UUID, connection_id: UU
     return conn
 
 
+async def _check_reach(connector_type: str, host: str, port: int, database: str) -> None:
+    import asyncio
+
+    from app.services.connection_policy import ConnectionNotAllowed, assert_connection_allowed
+
+    try:
+        await asyncio.to_thread(assert_connection_allowed, connector_type, host, port, database)
+    except ConnectionNotAllowed as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 def _sanitize_basename(value: str) -> str:
     base = re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip()).strip("._")
     return base or "import"
@@ -154,6 +165,7 @@ async def create_connection(
     if connector_type not in ("postgresql", "postgres", "sqlite", "mysql", "mariadb"):
         raise HTTPException(status_code=400, detail="Unsupported connector type")
 
+    await _check_reach(connector_type, request.host or "", int(request.port or 0), request.database)
     encrypted_password = encrypt_secret(request.password) if request.password else None
     conn = ExternalConnection(
         name=request.name,
@@ -276,6 +288,7 @@ async def update_connection(
         conn.ssl = bool(patch["ssl"])
     if "extra" in patch and patch["extra"] is not None:
         conn.extra = to_jsonable(patch["extra"] or {})
+    await _check_reach(conn.connector_type, conn.host or "", int(conn.port or 0), conn.database)
 
     conn.updated_by = user.user_id
     try:

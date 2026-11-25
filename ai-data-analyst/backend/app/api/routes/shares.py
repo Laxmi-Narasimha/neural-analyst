@@ -24,6 +24,7 @@ from app.core.exceptions import DataNotFoundException
 from app.models import Artifact as ArtifactModel
 from app.models import ArtifactShare as ArtifactShareModel
 from app.models import ArtifactType as ModelArtifactType
+from app.models import User as UserModel
 from app.services.auth_service import AuthUser, Permission
 from app.services.database import get_db_session
 from app.services.object_store import get_object_store
@@ -144,7 +145,10 @@ async def get_shared_report(
     q = (
         select(ArtifactShareModel, ArtifactModel)
         .join(ArtifactModel, ArtifactModel.id == ArtifactShareModel.artifact_id)
+        .join(UserModel, UserModel.id == ArtifactModel.owner_id)
         .where(
+            UserModel.is_active == True,  # noqa: E712
+            UserModel.is_deleted == False,  # noqa: E712
             ArtifactShareModel.token_hash == h,
             ArtifactShareModel.revoked_at.is_(None),
             or_(ArtifactShareModel.expires_at.is_(None), ArtifactShareModel.expires_at > now),

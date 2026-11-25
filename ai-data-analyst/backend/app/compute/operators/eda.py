@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from app.compute.operators.base import OperatorContext, OperatorResult
+from app.services.retail_calendar import RetailCalendar
 
 
 def _safe_numeric_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -37,10 +38,7 @@ def _mask_pii_preview(df: pd.DataFrame, pii_cols: set[str]) -> pd.DataFrame:
 
 def _pandas_resample_freq(freq: str) -> str:
     code = str(freq or "").upper().strip()
-    # Pandas deprecated "M" (month-end) in favor of "ME". Keep API accepting "M".
-    if code == "M":
-        return "ME"
-    return code
+    return {"M": "ME", "Q": "QE", "Y": "YE"}.get(code, code)
 
 
 @dataclass(frozen=True)
@@ -997,12 +995,12 @@ class ResampleAggregateOperator:
             numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
             value_col = numeric_cols[0] if numeric_cols else None
 
-        allowed_freqs = ["D", "W", "M"]
+        allowed_freqs = ["D", "W", "M"] if freq not in {"Q", "Y"} else ["Q", "Y"]
         if freq not in allowed_freqs:
             freq = "M"
 
         sub = df[[str(time_col)] + ([str(value_col)] if value_col and str(value_col) in df.columns else [])].copy()
-        sub[str(time_col)] = pd.to_datetime(sub[str(time_col)], errors="coerce", utc=False)
+        sub[str(time_col)] = pd.to_datetime(sub[str(time_col)], errors="coerce", format="mixed", utc=True)
         sub = sub.dropna(subset=[str(time_col)])
         if sub.empty:
             out = pd.DataFrame(columns=["period", "count", "value_mean", "value_sum"])
@@ -1032,24 +1030,76 @@ class ResampleAggregateOperator:
             out["value_mean"] = np.nan
             out["value_sum"] = np.nan
 
-        periods = pd.to_datetime(out["period"], errors="coerce")
-        if getattr(periods.dt, "tz", None) is not None:
-            periods = periods.dt.tz_convert(None)
-        out["period"] = periods.dt.strftime("%Y-%m-%d %H:%M:%S")
+        return finish_resample(out, chosen_freq, time_col=str(time_col), value_col=value_col)
 
-        return OperatorResult(
-            tables={"resample": out},
-            metrics={
-                "points": int(out.shape[0]),
-            },
-            charts={},
-            summary={
-                "time_column": str(time_col),
-                "value_column": str(value_col) if value_col else None,
-                "freq": chosen_freq,
-                "points": int(out.shape[0]),
-            },
+
+def finish_resample(out: pd.DataFrame, chosen_freq: str, *, time_col: str, value_col: Any) -> OperatorResult:
+    """Labels, highlights, year-over-year and chart for a trend table (period, count, value_mean,
+    value_sum). Shared by the in-memory operator and the batched (disk) path so answers match."""
+    periods = pd.to_datetime(out["period"], errors="coerce")
+    if getattr(periods.dt, "tz", None) is not None:
+        periods = periods.dt.tz_convert(None)
+    out = out.copy()
+    out["period"] = periods.dt.strftime("%Y-%m-%d")
+    out["label"] = _period_labels(periods, chosen_freq)
+    has_value = bool(out["value_sum"].notna().any())
+    measure = "value_sum" if has_value else "count"
+    summary: dict[str, Any] = {
+        "time_column": str(time_col),
+        "value_column": str(value_col) if value_col else None,
+        "freq": chosen_freq,
+        "points": int(out.shape[0]),
+        "measure": measure,
+    }
+    charts: dict[str, Any] = {}
+    series = out[["label", measure]].dropna()
+    if not series.empty:
+        hi, lo = series.loc[series[measure].idxmax()], series.loc[series[measure].idxmin()]
+        summary.update(
+            first_label=str(series["label"].iloc[0]), last_label=str(series["label"].iloc[-1]),
+            last_value=float(series[measure].iloc[-1]),
+            highest={"label": str(hi["label"]), "value": float(hi[measure])},
+            lowest={"label": str(lo["label"]), "value": float(lo[measure])},
         )
+        # Same period a year earlier, when the series reaches back that far.
+        lag = {"M": 12, "Q": 4, "W": 52}.get(chosen_freq)
+        if lag and len(series) > lag and float(series[measure].iloc[-1 - lag]) != 0:
+            prev = float(series[measure].iloc[-1 - lag])
+            summary["year_earlier"] = {"label": str(series["label"].iloc[-1 - lag]), "value": prev,
+                                       "change_pct": (float(series[measure].iloc[-1]) - prev) / abs(prev) * 100}
+        try:
+            from app.compute.chart_helpers import build_chart
+            from app.ml.visualization import ChartType
+
+            what = f"{value_col}" if has_value else "Rows"
+            period = {"D": "Daily", "W": "Weekly", "M": "Monthly", "Q": "Quarterly", "Y": "Yearly"}.get(chosen_freq, "")
+            charts["trend"] = build_chart(series.rename(columns={measure: what, "label": time_col}),
+                                          chart_type=ChartType.LINE, x=time_col, y=what,
+                                          title=f"{period} {'total ' if has_value else ''}{what}".strip())
+        except Exception:
+            pass
+
+    return OperatorResult(
+        tables={"resample": out},
+        metrics={
+            "points": int(out.shape[0]),
+        },
+        charts=charts,
+        summary=summary,
+    )
+
+
+def _period_labels(periods: pd.Series, freq: str) -> list[str]:
+    """How people name periods: 'Jan 2024', '2024 Q1', '2024', 'week of 2024-01-01'."""
+    if freq == "M":
+        return [p.strftime("%b %Y") if pd.notna(p) else "" for p in periods]
+    if freq == "Q":
+        return [f"{p.year} Q{p.quarter}" if pd.notna(p) else "" for p in periods]
+    if freq == "Y":
+        return [str(p.year) if pd.notna(p) else "" for p in periods]
+    if freq == "W":
+        return [f"week to {p.strftime('%Y-%m-%d')}" if pd.notna(p) else "" for p in periods]
+    return [p.strftime("%Y-%m-%d") if pd.notna(p) else "" for p in periods]
 
 
 @dataclass(frozen=True)
@@ -1295,30 +1345,21 @@ class SegmentSummaryOperator:
             numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
             value_column = numeric_cols[0] if numeric_cols else None
 
-        # Always compute count; compute mean/sum when a numeric column exists.
+        # Aggregate on the original group index so nulls and strings stay distinct.
         g = df.groupby(str(group_by), dropna=False)
-        counts = g.size().rename("count")
-
-        out = counts.reset_index().rename(columns={str(group_by): "group"})
-        out["group"] = out["group"].astype(str)
+        out = g.size().to_frame("count")
 
         if value_column and str(value_column) in df.columns and pd.api.types.is_numeric_dtype(df[str(value_column)]):
-            means = g[str(value_column)].mean().rename("value_mean")
-            sums = g[str(value_column)].sum().rename("value_sum")
-            medians = g[str(value_column)].median().rename("value_median")
-            means_df = means.reset_index().rename(columns={str(group_by): "group"})
-            means_df["group"] = means_df["group"].astype(str)
-            sums_df = sums.reset_index().rename(columns={str(group_by): "group"})
-            sums_df["group"] = sums_df["group"].astype(str)
-            medians_df = medians.reset_index().rename(columns={str(group_by): "group"})
-            medians_df["group"] = medians_df["group"].astype(str)
-            out = out.merge(means_df, on="group", how="left")
-            out = out.merge(sums_df, on="group", how="left")
-            out = out.merge(medians_df, on="group", how="left")
+            values = g[str(value_column)]
+            out["value_mean"] = values.mean()
+            out["value_sum"] = values.sum()
+            out["value_median"] = values.median()
         else:
             out["value_mean"] = np.nan
             out["value_sum"] = np.nan
             out["value_median"] = np.nan
+        out = out.rename_axis("group").reset_index()
+        out["group"] = out["group"].map(lambda value: str(value) if pd.notna(value) else None)
 
         sort_by = str(params.get("sort_by") or "count").strip().lower()
         ascending = bool(params.get("ascending", False))
@@ -1326,7 +1367,9 @@ class SegmentSummaryOperator:
             sort_by = "count"
         if sort_by != "count" and sort_by not in out.columns:
             sort_by = "count"
-        if sort_by != "count" and out[sort_by].isna().all():
+        if sort_by == "value_mean":
+            out = out.dropna(subset=["value_mean"])
+        elif sort_by != "count" and out[sort_by].isna().all():
             sort_by = "count"
 
         sort_cols = [sort_by]
@@ -1950,7 +1993,125 @@ class SegmentDeepDiveOperator:
         )
 
 
+@dataclass(frozen=True)
+class MeasureAggregateOperator:
+    name: str = "measure_aggregate"
+
+    def run(self, ctx: OperatorContext, params: dict[str, Any]) -> OperatorResult:
+        measure = params.get("value_column")
+        group = params.get("group_by")
+        agg = params["aggregation"]
+        if agg not in {"sum", "mean", "min", "max", "median", "count", "distinct_count"}:
+            raise ValueError("Unsupported aggregation")
+        if measure in _pii_columns(ctx) or group in _pii_columns(ctx):
+            raise ValueError("Select a non-sensitive analysis column")
+        if agg in {"count", "distinct_count"} and not params.get("retail_unit"):
+            return self._count(ctx, measure, group, agg)
+        if not measure:
+            raise ValueError("A numeric value column is required")
+        values = ctx.df[measure]
+        if not pd.api.types.is_numeric_dtype(values):
+            raise ValueError(f"{measure} is not numeric")
+        if params.get("retail_unit"):
+            axis = params["time_column"]
+            if axis in _pii_columns(ctx):
+                raise ValueError("Select a non-sensitive date column")
+            cal = RetailCalendar(**params["retail_calendar"])
+            dates = pd.to_datetime(ctx.df[axis], errors="coerce", format="mixed", utc=True).dt.tz_localize(None)
+            valid = dates.dropna()
+            table = pd.DataFrame(columns=["group", "value"])
+            if not valid.empty:
+                bins = list(cal.buckets(valid.min().date(), valid.max().date(), params["retail_unit"]))
+                edges = [pd.Timestamp(b[0]) for b in bins] + [pd.Timestamp(bins[-1][1])]
+                keys = pd.cut(dates, edges, labels=[b[2] for b in bins], right=False)
+                grouped = values.groupby(keys, observed=True)
+                result = grouped.sum(min_count=1) if agg == "sum" else grouped.agg(agg)
+                table = result.rename_axis("group").reset_index(name="value")
+            return OperatorResult(tables={"result": table.head(1000)}, metrics={}, charts={},
+                                  summary={**params, "group_by": "retail " + params["retail_unit"],
+                                           "undated_rows": int(dates.isna().sum()), "groups_truncated": len(table) > 1000})
+        if group:
+            grouped = values.groupby(ctx.df[group], dropna=False, observed=True)
+            result = grouped.sum(min_count=1) if agg == "sum" else grouped.agg(agg)
+            table = result.sort_values(ascending=False, kind="stable").rename_axis("group").reset_index(name="value")
+        else:
+            value = values.sum(min_count=1) if agg == "sum" else values.agg(agg)
+            table = pd.DataFrame({"value": [value]})
+        return OperatorResult(tables={"result": table}, metrics={}, charts={},
+                              summary={"value_column": measure, "group_by": group, "aggregation": agg})
+
+    @staticmethod
+    def _count(ctx: OperatorContext, measure: Any, group: Any, agg: str) -> OperatorResult:
+        """Row count (count) or distinct values of a column (distinct_count), overall or per group."""
+        df = ctx.df
+        if agg == "distinct_count":
+            if not measure:
+                raise ValueError("distinct_count needs the column whose distinct values are counted")
+            if group:
+                result = df.groupby(df[group], dropna=False, observed=True)[measure].nunique(dropna=True)
+            else:
+                table = pd.DataFrame({"value": [int(df[measure].nunique(dropna=True))]})
+        elif group:
+            result = df.groupby(df[group], dropna=False, observed=True).size()
+        else:
+            table = pd.DataFrame({"value": [int(len(df))]})
+        if group:
+            table = result.astype(int).sort_values(ascending=False, kind="stable").rename_axis("group").reset_index(name="value")
+        return OperatorResult(tables={"result": table}, metrics={}, charts={},
+                              summary={"value_column": measure, "group_by": group, "aggregation": agg})
+
+
+def _matches_value(series: pd.Series, value: Any) -> pd.Series:
+    """Rows equal to ``value``; text compares trimmed and case-insensitively, numbers numerically."""
+    if pd.api.types.is_bool_dtype(series):
+        truthy = str(value).strip().casefold() in {"true", "1", "yes", "y"}
+        return series.fillna(not truthy).astype(bool) == truthy
+    if pd.api.types.is_numeric_dtype(series):
+        try:
+            return series == float(value)
+        except (TypeError, ValueError):
+            return pd.Series(False, index=series.index)
+    return series.astype("string").str.strip().str.casefold() == str(value).strip().casefold()
+
+
+class RateOperator:
+    """Share of rows where a column equals a value: churn, return, attrition, conversion rates."""
+
+    name: str = "rate"
+
+    def run(self, ctx: OperatorContext, params: dict[str, Any]) -> OperatorResult:
+        column = params["column"]
+        positive = params["positive_value"]
+        group = params.get("group_by")
+        pii = _pii_columns(ctx)
+        if column in pii or group in pii:
+            raise ValueError("Select a non-sensitive analysis column")
+        df = ctx.df
+        known = df[column].notna()
+        hit = _matches_value(df[column], positive) & known
+        frame = pd.DataFrame({"hit": hit.astype(int), "known": known.astype(int)})
+        if group:
+            frame["group"] = df[group]
+            agg = frame.groupby("group", dropna=False, observed=True).agg(matching=("hit", "sum"), rows=("known", "sum"))
+            agg = agg[agg["rows"] > 0]
+            agg["rate"] = agg["matching"] / agg["rows"]
+            table = agg.reset_index().sort_values(["rate", "rows"], ascending=[bool(params.get("ascending")), False], kind="stable")
+        else:
+            rows = int(frame["known"].sum())
+            matching = int(frame["hit"].sum())
+            table = pd.DataFrame({"rate": [matching / rows if rows else None], "matching": [matching], "rows": [rows]})
+        table["rate_pct"] = table["rate"] * 100
+        cols = (["group"] if group else []) + ["rate", "rate_pct", "matching", "rows"]
+        return OperatorResult(
+            tables={"result": table[cols].head(1000)}, metrics={}, charts={},
+            summary={"column": column, "positive_value": positive, "group_by": group,
+                     "rows_missing_value": int((~known).sum())},
+        )
+
+
 P0_EDA_OPERATORS = [
+    MeasureAggregateOperator(),
+    RateOperator(),
     SchemaSnapshotOperator(),
     DatasetOverviewOperator(),
     PreviewRowsOperator(),

@@ -73,6 +73,9 @@ async def create_checkout(
     customer_id = state.get("stripe_customer_id")
 
     base_frontend = settings.billing.frontend_url.rstrip("/")
+    for url in (body.success_url, body.cancel_url):
+        if url and not _same_site(url, base_frontend):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Return URLs must be on this site")
     success = body.success_url or f"{base_frontend}/app/settings?billing=success"
     cancel = body.cancel_url or f"{base_frontend}/pricing?billing=cancelled"
 
@@ -190,11 +193,23 @@ async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db_ses
     return {"received": True}
 
 
+def _same_site(url: str, base: str) -> bool:
+    from urllib.parse import urlsplit
+
+    a, b = urlsplit(url), urlsplit(base)
+    return bool(a.scheme in {"http", "https"} and a.scheme == b.scheme and a.netloc.lower() == b.netloc.lower())
+
+
 def _verify_stripe_signature(payload: bytes, header: str, secret: str) -> bool:
     try:
         parts = dict(p.split("=", 1) for p in header.split(",") if "=" in p)
         timestamp = parts.get("t", "")
         v1 = parts.get("v1", "")
+        import time as _time
+
+        # Stripe's own tolerance: an event signed more than 5 minutes ago is a replay.
+        if abs(_time.time() - int(timestamp)) > 300:
+            return False
         signed = f"{timestamp}.{payload.decode('utf-8')}".encode("utf-8")
         expected = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, v1)

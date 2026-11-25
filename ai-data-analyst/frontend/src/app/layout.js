@@ -2,14 +2,19 @@ import '@/styles/globals.css';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
 import FluidBackground from '@/components/effects/FluidBackground';
+import SiteChrome from '@/components/layout/SiteChrome';
+
+const PRIVATE_BETA = process.env.NEXT_PUBLIC_PRIVATE_BETA !== 'false';
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL
+  || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000');
 
 export const metadata = {
-  metadataBase: new URL('https://neuralanalyst.ai'),
+  metadataBase: new URL(SITE_URL),
   title: {
-    default: 'NeuralAnalyst - Your 24/7 AI Data Analyst',
+    default: 'NeuralAnalyst - Open-source AI data analyst',
     template: '%s | NeuralAnalyst',
   },
-  description: 'NeuralAnalyst is an AI-powered data analyst that works 24/7. Analyze millions of data points, generate insights, and build ML models without coding. Free tier available. BYOK supported.',
+  description: 'Open-source AI data analyst: plain-language questions answered by validated plans and deterministic code, with the evidence shown.',
   keywords: [
     'AI data analyst',
     'machine learning',
@@ -29,11 +34,11 @@ export const metadata = {
   creator: 'NeuralAnalyst',
   publisher: 'NeuralAnalyst',
   robots: {
-    index: true,
-    follow: true,
+    index: !PRIVATE_BETA,
+    follow: !PRIVATE_BETA,
     googleBot: {
-      index: true,
-      follow: true,
+      index: !PRIVATE_BETA,
+      follow: !PRIVATE_BETA,
       'max-video-preview': -1,
       'max-image-preview': 'large',
       'max-snippet': -1,
@@ -42,10 +47,10 @@ export const metadata = {
   openGraph: {
     type: 'website',
     locale: 'en_US',
-    url: 'https://neuralanalyst.ai',
+    url: SITE_URL,
     siteName: 'NeuralAnalyst',
-    title: 'NeuralAnalyst - Your 24/7 AI Data Analyst',
-    description: 'AI-powered data analyst that works around the clock. 244+ features, 3.5M rows/hour, enterprise-grade security.',
+    title: 'NeuralAnalyst - Open-source AI data analyst',
+    description: 'Ask questions of your data and check the evidence behind every answer.',
     images: [
       {
         url: '/og-image.png',
@@ -57,16 +62,12 @@ export const metadata = {
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'NeuralAnalyst - Your 24/7 AI Data Analyst',
-    description: 'AI-powered data analyst that works around the clock. 244+ features, no coding required.',
+    title: 'NeuralAnalyst - Open-source AI data analyst',
+    description: 'Ask questions of your data and check the evidence behind every answer.',
     images: ['/twitter-image.png'],
-    creator: '@neuralanalyst',
-  },
-  verification: {
-    google: 'google-site-verification-code',
   },
   alternates: {
-    canonical: 'https://neuralanalyst.ai',
+    canonical: SITE_URL,
   },
   category: 'technology',
 };
@@ -85,28 +86,7 @@ const jsonLd = {
   name: 'NeuralAnalyst',
   applicationCategory: 'BusinessApplication',
   operatingSystem: 'Web',
-  description: 'AI-powered data analyst with 244+ features for automated data analysis, machine learning, and visualization.',
-  offers: {
-    '@type': 'Offer',
-    price: '0',
-    priceCurrency: 'USD',
-    description: 'Free tier available. Pro starts at $29/month.',
-  },
-  aggregateRating: {
-    '@type': 'AggregateRating',
-    ratingValue: '4.9',
-    ratingCount: '1250',
-    bestRating: '5',
-    worstRating: '1',
-  },
-  featureList: [
-    '244+ Data Analysis Features',
-    '24/7 Automated Analysis',
-    'Natural Language Queries',
-    'Machine Learning & AutoML',
-    'Real-time Dashboards',
-    'BYOK - Use Your Own API Keys',
-  ],
+  description: 'Open-source AI data analyst with evidence-backed answers.',
 };
 
 export default function RootLayout({ children }) {
@@ -122,10 +102,9 @@ export default function RootLayout({ children }) {
         />
       </head>
       <body suppressHydrationWarning>
-        <FluidBackground />
-        <Header />
-        <main style={{ position: 'relative', zIndex: 1 }}>{children}</main>
-        <Footer />
+        <SiteChrome background={<FluidBackground />} header={<Header />} footer={<Footer />}>
+          {children}
+        </SiteChrome>
       </body>
     </html>
   );

@@ -107,6 +107,9 @@ class ColumnProfile:
     
     # Distribution
     value_distribution: dict[str, int] = field(default_factory=dict)
+    # Earliest / latest parsed date for date columns (ISO strings)
+    date_min: Optional[str] = None
+    date_max: Optional[str] = None
     
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -130,7 +133,12 @@ class ColumnProfile:
             "has_outliers": self.has_outliers,
             "is_constant": self.is_constant,
             "is_unique_identifier": self.is_unique_identifier,
-            "is_potential_pii": self.is_potential_pii
+            "is_potential_pii": self.is_potential_pii,
+            # Complete value list for low-cardinality columns, so planners can bind
+            # "electronics" or "apparal" to the real value. Never for sensitive columns.
+            "top_values": {} if self.is_potential_pii else dict(list(self.value_distribution.items())[:50]),
+            "date_min": self.date_min,
+            "date_max": self.date_max,
         }
 
 
@@ -751,9 +759,18 @@ class DataIngestionService:
                 pass
         
         # Value distribution (for categorical)
-        if unique_count <= 20:
-            value_counts = series.value_counts().head(20)
-            profile.value_distribution = value_counts.to_dict()
+        if unique_count <= 50:
+            value_counts = series.value_counts().head(50)
+            profile.value_distribution = {str(k): int(v) for k, v in value_counts.items()}
+
+        if profile.inferred_type in (DataType.DATE, DataType.DATETIME):
+            try:
+                parsed = pd.to_datetime(non_null.astype(str), errors="coerce", format="mixed", utc=True).dropna()
+                if len(parsed):
+                    profile.date_min = parsed.min().date().isoformat()
+                    profile.date_max = parsed.max().date().isoformat()
+            except Exception:
+                pass
         
         # Flags
         profile.is_constant = unique_count <= 1

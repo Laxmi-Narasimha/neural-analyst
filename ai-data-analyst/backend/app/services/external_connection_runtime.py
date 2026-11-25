@@ -104,7 +104,20 @@ def create_engine_for_connection(cfg: ConnectionRuntimeConfig) -> AsyncEngine:
     )
 
 
+async def _ensure_allowed(cfg: ConnectionRuntimeConfig) -> None:
+    """Checked before every use: a saved host name can be re-pointed after it was saved."""
+    import asyncio
+
+    from app.services.connection_policy import ConnectionNotAllowed, assert_connection_allowed
+
+    try:
+        await asyncio.to_thread(assert_connection_allowed, cfg.connector_type, cfg.host, cfg.port, cfg.database)
+    except ConnectionNotAllowed as e:
+        raise ConnectionRuntimeError(str(e)) from e
+
+
 async def test_connection(cfg: ConnectionRuntimeConfig) -> float:
+    await _ensure_allowed(cfg)
     engine = create_engine_for_connection(cfg)
     try:
         start = time.perf_counter()
@@ -116,6 +129,7 @@ async def test_connection(cfg: ConnectionRuntimeConfig) -> float:
 
 
 async def run_query(cfg: ConnectionRuntimeConfig, sql: str, *, jsonable: bool = True) -> dict[str, Any]:
+    await _ensure_allowed(cfg)
     engine = create_engine_for_connection(cfg)
     try:
         start = time.perf_counter()
@@ -137,6 +151,7 @@ async def run_query(cfg: ConnectionRuntimeConfig, sql: str, *, jsonable: bool = 
 
 
 async def list_tables(cfg: ConnectionRuntimeConfig) -> list[str]:
+    await _ensure_allowed(cfg)
     engine = create_engine_for_connection(cfg)
     try:
         async with engine.connect() as conn:

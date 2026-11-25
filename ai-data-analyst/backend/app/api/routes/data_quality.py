@@ -20,6 +20,7 @@ from app.services.artifact_index import ArtifactIndexService
 from app.services.auth_service import AuthUser, Permission
 from app.services.database import get_db_session
 from app.services.dataset_loader import DatasetLoaderService
+from app.services.subscription_service import SubscriptionService, UsageAction
 
 router = APIRouter()
 
@@ -47,6 +48,7 @@ async def start_validation_session(
     user: AuthUser = Depends(require_permission(Permission.RUN_ANALYSIS)),
 ):
     """Start a new data adequacy validation session."""
+    await SubscriptionService(db).assert_can_run(user.user_id, action=UsageAction.QUALITY_RUN)
     try:
         files: list[str] = []
         dataset_version_hash: str | None = None

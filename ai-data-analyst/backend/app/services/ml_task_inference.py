@@ -81,6 +81,59 @@ def _detect_time_columns(df: pd.DataFrame) -> list[str]:
     return cols
 
 
+def resolve_split_time_column(
+    df: pd.DataFrame,
+    *,
+    target_column: str,
+    time_column: Optional[str] = None,
+    split: Optional[str] = None,
+) -> tuple[Optional[str], list[str]]:
+    """Choose the column that orders rows for a time-based evaluation split.
+
+    Returns (time column or None, notes for the user). An explicit ``time_column``
+    wins; ``split="random"`` disables time ordering. Otherwise the earliest-occurring
+    detected date column is used, on the assumption that later timestamps (delivery,
+    closure, resolution) are recorded after the moment a prediction would be made.
+    """
+    notes: list[str] = []
+    if time_column:
+        if time_column not in df.columns:
+            raise ValueError(f"Time column '{time_column}' not found")
+        return time_column, notes
+    if str(split or "auto").strip().lower() in {"random", "random_split", "shuffle"}:
+        return None, notes
+    from app.ml.tabular_pipeline import _looks_like_dates, parse_datetime
+
+    medians: dict[str, pd.Timestamp] = {}
+    for c in df.columns:
+        if c == target_column:
+            continue
+        s = df[c]
+        if not pd.api.types.is_datetime64_any_dtype(s):
+            if s.dtype != object or not _looks_like_dates(s.dropna(), str(c)):
+                continue
+        try:
+            parsed = parse_datetime(s)
+        except Exception:
+            continue
+        if parsed.notna().mean() >= 0.6 and parsed.nunique() > 1:
+            medians[str(c)] = parsed.median()
+    if not medians:
+        return None, notes
+    chosen = min(medians, key=lambda c: medians[c])
+    notes.append(
+        f"Evaluated on the most recent rows by '{chosen}': the model is trained on earlier records and "
+        "tested on later ones, the way it would be used."
+    )
+    later = [c for c in medians if c != chosen]
+    if later:
+        notes.append(
+            "Check that these date columns are known at prediction time; if they are recorded afterwards "
+            "(for example a delivery or closing date), exclude them: " + ", ".join(later)
+        )
+    return chosen, notes
+
+
 def _is_id_like(name: str, series: pd.Series, unique_ratio: float) -> bool:
     if _ID_NAME_RE.search(name):
         return True

@@ -3,7 +3,7 @@
 
 from fastapi import APIRouter
 
-from app.api.routes import datasets, chat, analyses, auth, ml, analytics, connections, data_quality, data_speaks, jobs, dashboard, artifacts, metrics, shares, maintenance, billing
+from app.api.routes import datasets, chat, analyses, auth, ml, analytics, connections, data_quality, data_speaks, jobs, dashboard, artifacts, metrics, shares, maintenance, billing, system
 
 # Create main router
 api_router = APIRouter()
@@ -26,6 +26,7 @@ api_router.include_router(shares.router, prefix="/shares", tags=["Shares"])
 api_router.include_router(shares.public_router, prefix="/public", tags=["Public"])
 api_router.include_router(maintenance.router, prefix="/maintenance", tags=["Maintenance"])
 api_router.include_router(billing.router, prefix="/billing", tags=["Billing"])
+api_router.include_router(system.router, prefix="/system", tags=["System"])
 
 __all__ = [
     "api_router",
@@ -45,5 +46,6 @@ __all__ = [
     "shares",
     "maintenance",
     "billing",
+    "system",
 ]
 

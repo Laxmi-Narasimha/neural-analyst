@@ -56,7 +56,8 @@ async def get_metrics(
         }
 
     # Keep this endpoint intentionally lightweight and safe: no PII, no raw data.
-    snap = metrics_collector.snapshot()
+    # The in-process counters cover every tenant's traffic, so only admins see them.
+    snap = metrics_collector.snapshot() if user.is_admin() else {}
 
     datasets_total = (await db.execute(
         select(func.count()).select_from(Dataset).where(Dataset.owner_id == user.user_id, Dataset.is_deleted == False)  # noqa: E712

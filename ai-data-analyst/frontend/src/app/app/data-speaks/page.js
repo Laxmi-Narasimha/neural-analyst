@@ -163,6 +163,20 @@ export default function DataSpeaksPage() {
         loadActionFeed();
     }, [loadActionFeed]);
 
+    const stopPolling = useCallback((childId) => {
+        const key = String(childId || '');
+        if (!key) return;
+        const handle = pollersRef.current[key];
+        if (handle) {
+            try {
+                clearInterval(handle);
+            } catch {
+                // ignore
+            }
+            delete pollersRef.current[key];
+        }
+    }, []);
+
     useEffect(() => {
         // New session: stop any in-flight action pollers.
         for (const key of Object.keys(pollersRef.current || {})) {
@@ -351,20 +365,6 @@ export default function DataSpeaksPage() {
             if (!inserted) out.unshift(item);
             return out;
         });
-    }, []);
-
-    const stopPolling = useCallback((childId) => {
-        const key = String(childId || '');
-        if (!key) return;
-        const handle = pollersRef.current[key];
-        if (handle) {
-            try {
-                clearInterval(handle);
-            } catch {
-                // ignore
-            }
-            delete pollersRef.current[key];
-        }
     }, []);
 
     const startPolling = useCallback(

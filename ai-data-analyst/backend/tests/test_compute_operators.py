@@ -141,8 +141,9 @@ def test_resample_aggregate_coarsens_to_max_points_and_formats_period():
 
     out = result.tables["resample"]
     assert out.shape[0] <= 50
-    assert list(out.columns) == ["period", "count", "value_mean", "value_sum"]
-    assert out["period"].astype(str).str.match(r"\d{4}-\d{2}-\d{2}").all()
+    assert list(out.columns) == ["period", "count", "value_mean", "value_sum", "label"]
+    assert out["period"].astype(str).str.fullmatch(r"\d{4}-\d{2}-\d{2}").all()
+    assert result.summary["highest"]["label"] and "trend" in result.charts
 
 
 def test_association_scan_finds_cat_num_and_cat_cat():

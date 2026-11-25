@@ -48,7 +48,28 @@ _DUCKDB_FORBIDDEN_TABLE_FUNCS = (
     "mysql_scan",
     "iceberg_scan",
     "delta_scan",
+    "glob",
+    "read_text",
+    "read_blob",
+    "read_ndjson",
+    "read_ndjson_auto",
+    "read_json_objects",
+    "read_json_objects_auto",
+    "ndjson_scan",
+    "read_xlsx",
+    "st_read",
+    "sniff_csv",
+    "parquet_metadata",
+    "parquet_schema",
+    "parquet_file_metadata",
+    "parquet_kv_metadata",
+    "duckdb_secrets",
+    "duckdb_settings",
+    "getenv",
 )
+# Comments inside a query can split a pattern ("FROM/**/'file.csv'"), so the file checks run on
+# the query with every comment replaced by a space.
+_COMMENTS_RE = re.compile(r"/\*.*?\*/|--[^\n]*", flags=re.DOTALL)
 _DUCKDB_FORBIDDEN_FUNCS_RE = re.compile(
     r"\b(" + "|".join(_DUCKDB_FORBIDDEN_TABLE_FUNCS) + r")\b",
     flags=re.IGNORECASE,
@@ -89,7 +110,7 @@ def validate_dataset_sql(sql: str) -> str:
 
     s = validate_readonly_sql(sql)
     # Check the user query itself for obvious file scan/exfil patterns.
-    leading_stripped = _LEADING_RE.sub("", s).lstrip()
+    leading_stripped = _COMMENTS_RE.sub(" ", s)
     if _DUCKDB_FORBIDDEN_FUNCS_RE.search(leading_stripped):
         raise UnsafeSQLError("Query contains a forbidden table function")
     if _DUCKDB_FROM_FILE_LITERAL_RE.search(leading_stripped):

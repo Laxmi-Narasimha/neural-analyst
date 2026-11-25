@@ -2,12 +2,19 @@ import Link from 'next/link';
 import { IconCheck, IconX, IconArrowRight, IconKey, IconShield, IconUsers, IconBuilding } from '@/components/icons';
 import styles from './page.module.css';
 
+// Keep unmetered paid-plan promises off the public site during the private beta.
+const PRIVATE_BETA = process.env.NEXT_PUBLIC_PRIVATE_BETA !== 'false';
+
 export const metadata = {
-    title: 'Pricing - Simple, Transparent Plans',
-    description: 'Choose the perfect plan for your data analysis needs. Free tier available. BYOK option for full control with your own API keys.',
+    title: PRIVATE_BETA ? 'Private Beta - NeuralAnalyst' : 'Pricing - Simple, Transparent Plans',
+    description: PRIVATE_BETA
+        ? 'NeuralAnalyst is currently available by invitation for private beta testing.'
+        : 'Choose the perfect plan for your data analysis needs. Free tier available. BYOK option for full control with your own API keys.',
     openGraph: {
-        title: 'Pricing - NeuralAnalyst',
-        description: 'Flexible pricing for startups, professionals, and enterprises. Start free today.',
+        title: PRIVATE_BETA ? 'Private Beta - NeuralAnalyst' : 'Pricing - NeuralAnalyst',
+        description: PRIVATE_BETA
+            ? 'Join the NeuralAnalyst private beta with an invitation.'
+            : 'Flexible pricing for startups, professionals, and enterprises. Start free today.',
     },
 };
 
@@ -99,6 +106,27 @@ const faqs = [
 ];
 
 export default function PricingPage() {
+    if (PRIVATE_BETA) {
+        return (
+            <main className={styles.main}>
+                <section className={styles.hero}>
+                    <div className={styles.heroGlow}></div>
+                    <div className={styles.container}>
+                        <h1 className={styles.heroTitle}>Private <span className={styles.gradient}>Beta</span></h1>
+                        <p className={styles.heroSubtitle}>
+                            We are testing NeuralAnalyst with a small group of users. Access requires an invitation.
+                            Plans and pricing will be published after we measure reliability and operating costs.
+                        </p>
+                        <Link href="/register" className={styles.primaryBtn}>
+                            Use an invite code
+                            <IconArrowRight size={20} />
+                        </Link>
+                    </div>
+                </section>
+            </main>
+        );
+    }
+
     return (
         <main className={styles.main}>
             {/* Hero */}
